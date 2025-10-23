@@ -2,7 +2,11 @@
 set -e
 
 LOG_DIR="/opt/dendrite/logs"
-mkdir -p "$LOG_DIR"
+CONFIG_DIR="/opt/dendrite/config"
+DATA_DIR="/opt/dendrite/data"
+CERT_DIR="/opt/dendrite/certs"
+
+mkdir -p "$LOG_DIR" "$CONFIG_DIR" "$DATA_DIR/postgres" "$CERT_DIR"
 exec > >(tee -a "$LOG_DIR/install.log") 2>&1
 
 echo "======================================"
@@ -25,11 +29,8 @@ fi
 # 安装依赖
 echo "[1/7] 安装 Docker / Docker Compose / Nginx / Certbot"
 apt update -y
-apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx openssl
+apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx openssl dnsutils
 systemctl enable --now docker
-
-# 创建目录
-mkdir -p /opt/dendrite/{config,data/postgres,certs}
 
 # 检测域名解析
 VPS_IP=$(curl -s ifconfig.me)
@@ -45,18 +46,24 @@ else
 fi
 
 # 设置权限
-sudo chown -R $(whoami):$(whoami) /opt/dendrite/config
-sudo chmod -R 755 /opt/dendrite/config
+sudo chown -R $(whoami):$(whoami) "$CONFIG_DIR"
+sudo chmod -R 755 "$CONFIG_DIR"
 
 # 生成 Dendrite 密钥
-docker run --rm -v /opt/dendrite/config:/mnt matrixdotorg/dendrite-monolith:latest \
+docker run --rm -v "$CONFIG_DIR:/mnt" matrixdotorg/dendrite-monolith:latest \
     /usr/bin/generate-keys -private-key /mnt/matrix_key.pem
 
 # 生成 dendrite.yaml 配置文件
-docker run --rm -v /opt/dendrite/config:/mnt matrixdotorg/dendrite-monolith:latest \
+docker run --rm -v "$CONFIG_DIR:/mnt" matrixdotorg/dendrite-monolith:latest \
     /usr/bin/generate-config -dir /mnt \
     -db "postgres://dendrite:$DB_PASS@postgres:5432/dendrite?sslmode=disable" \
     -server "$DOMAIN"
+
+# 检查配置文件是否生成
+if [[ ! -f "$CONFIG_DIR/dendrite.yaml" ]]; then
+    echo "❌ dendrite.yaml 文件生成失败，请检查 generate-config 输出"
+    exit 1
+fi
 
 # Docker Compose 文件
 cat > /opt/dendrite/docker-compose.yml <<EOF
@@ -91,6 +98,7 @@ EOF
 
 # 启动 Docker Compose
 cd /opt/dendrite
+docker-compose down
 docker-compose up -d
 
 # 创建管理员账号
@@ -100,7 +108,6 @@ docker exec -it dendrite-monolith \
 
 # 配置 Nginx + 证书
 NGINX_CONF="/etc/nginx/sites-available/dendrite.conf"
-mkdir -p /opt/dendrite/certs
 
 if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
     echo "[7/7] 配置 Nginx + Let’s Encrypt"
@@ -124,8 +131,8 @@ NGX
     certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN || echo "Certbot 证书申请失败"
 else
     echo "[7/7] 配置 Nginx + 自签名证书"
-    SSL_KEY="/opt/dendrite/certs/selfsigned.key"
-    SSL_CRT="/opt/dendrite/certs/selfsigned.crt"
+    SSL_KEY="$CERT_DIR/selfsigned.key"
+    SSL_CRT="$CERT_DIR/selfsigned.crt"
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
         -keyout $SSL_KEY -out $SSL_CRT \
         -subj "/CN=$DOMAIN"
