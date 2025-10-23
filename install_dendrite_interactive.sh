@@ -5,6 +5,7 @@ set -e
 LOG_DIR="/opt/dendrite/logs"
 CONFIG_DIR="/opt/dendrite/config"
 DATA_DIR="/opt/dendrite/data"
+MEDIA_DIR="$DATA_DIR/media_store"
 CERT_DIR="/opt/dendrite/certs"
 
 # 颜色定义
@@ -52,18 +53,22 @@ wait_for_postgres() {
 # 等待 Dendrite 就绪
 wait_for_dendrite() {
     echo "[*] 等待 Dendrite 容器就绪..."
-    until docker-compose exec -T dendrite /usr/bin/dendrite-monolith --version >/dev/null 2>&1; do
+    for i in {1..30}; do
+        STATUS=$(docker inspect -f '{{.State.Health.Status}}' dendrite_dendrite_1 2>/dev/null || echo "")
+        if [[ "$STATUS" == "healthy" || "$STATUS" == "" ]]; then
+            return
+        fi
         echo "Dendrite 容器未就绪，等待 5 秒..."
         sleep 5
     done
-    echo "Dendrite 已就绪"
+    echo "⚠️ Dendrite 容器可能未正常启动，请检查日志"
 }
 
 # 安装函数
 install_dendrite() {
     echo -e "${GREEN}[开始安装 Dendrite]${NC}"
 
-    mkdir -p "$LOG_DIR" "$CONFIG_DIR" "$DATA_DIR/postgres" "$DATA_DIR/media_store" "$CERT_DIR"
+    mkdir -p "$LOG_DIR" "$CONFIG_DIR" "$DATA_DIR/postgres" "$MEDIA_DIR" "$CERT_DIR"
     exec > >(tee -a "$LOG_DIR/install.log") 2>&1
 
     VPS_IP=$(curl -s ifconfig.me)
@@ -110,11 +115,11 @@ install_dendrite() {
     fi
 
     chown -R $(whoami):$(whoami) "/opt/dendrite"
-    chmod -R 755 "$CONFIG_DIR"
+    chmod -R 755 "$CONFIG_DIR" "$MEDIA_DIR"
 
     echo "[2/7] 生成私钥"
     openssl genpkey -algorithm ED25519 -out "$CONFIG_DIR/matrix_key.pem"
-    chmod 644 "$CONFIG_DIR/matrix_key.pem"  # ✅ 容器可读权限
+    chmod 644 "$CONFIG_DIR/matrix_key.pem"
 
     echo "[3/7] 创建 Dendrite 配置文件"
     cat > "$CONFIG_DIR/dendrite.yaml" <<EOF
@@ -145,7 +150,7 @@ media_api:
     listen: http://0.0.0.0:7775
   external_api:
     listen: http://0.0.0.0:8075
-  base_path: /etc/dendrite/media_store
+  base_path: /media_store
 
 sync_api:
   internal_api:
@@ -193,8 +198,8 @@ services:
       - "8008:8008"
       - "8448:8448"
     volumes:
-      - ./config:/etc/dendrite:ro  # ✅ 只读挂载，容器可读
-      - ./data/media_store:/etc/dendrite/media_store
+      - ./config:/etc/dendrite:ro
+      - ./data/media_store:/media_store
       - ./logs:/var/log
     command: /usr/bin/dendrite-monolith --config /etc/dendrite/dendrite.yaml
     restart: unless-stopped
