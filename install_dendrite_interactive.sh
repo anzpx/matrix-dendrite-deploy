@@ -49,21 +49,13 @@ fi
 chown -R $(whoami):$(whoami) "/opt/dendrite"
 chmod -R 755 "$CONFIG_DIR"
 
-# 首先生成一个基本的配置文件用于生成密钥
-echo "[2/7] 创建基本配置文件用于生成密钥"
-cat > "$CONFIG_DIR/dendrite.yaml" <<EOF
-global:
-  server_name: $DOMAIN
-  private_key: /etc/dendrite/matrix_key.pem
-EOF
-
-# 生成 Dendrite 密钥
-echo "[3/7] 生成 Dendrite 密钥"
-docker run --rm -v "$CONFIG_DIR:/etc/dendrite" matrixdotorg/dendrite-monolith:latest \
-    /usr/bin/generate-keys -private-key /etc/dendrite/matrix_key.pem -config /etc/dendrite/dendrite.yaml
+# 首先生成密钥而不使用配置文件
+echo "[2/7] 生成 Dendrite 密钥"
+docker run --rm -v "$CONFIG_DIR:/mnt" matrixdotorg/dendrite-monolith:latest \
+    /usr/bin/generate-keys -private-key /mnt/matrix_key.pem
 
 # 创建完整的配置文件
-echo "[4/7] 创建完整配置文件"
+echo "[3/7] 创建完整配置文件"
 cat > "$CONFIG_DIR/dendrite.yaml" <<EOF
 global:
   server_name: $DOMAIN
@@ -137,7 +129,7 @@ mkdir -p "$DATA_DIR/media_store"
 chmod 755 "$DATA_DIR/media_store"
 
 # 创建 Docker Compose 文件
-echo "[5/7] 创建 Docker Compose 配置"
+echo "[4/7] 创建 Docker Compose 配置"
 cat > /opt/dendrite/docker-compose.yml <<EOF
 version: '3.7'
 services:
@@ -168,9 +160,6 @@ services:
       - ./config:/etc/dendrite
       - ./data/media_store:/etc/dendrite/media_store
       - ./logs:/var/log
-    environment:
-      - DENDRITE_SERVER_NAME=$DOMAIN
-      - DENDRITE_CONFIG=/etc/dendrite/dendrite.yaml
     command:
       - "/usr/bin/dendrite-monolith"
       - "--config"
@@ -181,7 +170,7 @@ services:
 EOF
 
 # 启动 Docker Compose
-echo "[6/7] 启动服务"
+echo "[5/7] 启动服务"
 cd /opt/dendrite
 docker-compose down >/dev/null 2>&1 || true
 docker-compose up -d
@@ -191,17 +180,17 @@ echo "等待服务启动..."
 sleep 30
 
 # 创建管理员账号
-echo "[7/7] 创建管理员账号"
+echo "[6/7] 创建管理员账号"
 docker-compose exec -T dendrite \
     /usr/bin/create-account --config /etc/dendrite/dendrite.yaml \
     --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin || {
     echo "管理员账号创建失败，可能已存在或服务未就绪"
     echo "稍后可以手动运行以下命令创建："
-    echo "docker-compose exec dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml --username $ADMIN_USER --password $ADMIN_PASS --admin"
+    echo "cd /opt/dendrite && docker-compose exec dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml --username $ADMIN_USER --password '$ADMIN_PASS' --admin"
 }
 
 # 配置 Nginx
-echo "配置 Nginx"
+echo "[7/7] 配置 Nginx"
 NGINX_CONF="/etc/nginx/sites-available/dendrite.conf"
 if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
     echo "配置 Nginx + Let's Encrypt"
@@ -312,5 +301,5 @@ echo "管理员账号: $ADMIN_USER"
 echo "日志路径: $LOG_DIR"
 echo "======================================"
 echo "检查服务状态: cd /opt/dendrite && docker-compose ps"
-echo "查看日志: cd /opt/dendrite && docker-compose logs"
+echo "查看日志: cd /opt/dendrite && docker-compose logs dendrite"
 echo "重启服务: cd /opt/dendrite && docker-compose restart"
