@@ -7,14 +7,14 @@ CONFIG_DIR="/opt/dendrite/config"
 DATA_DIR="/opt/dendrite/data"
 CERT_DIR="/opt/dendrite/certs"
 
-# 颜色定义
+# 颜色
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 显示菜单
+# 菜单
 show_menu() {
     echo -e "${BLUE}======================================${NC}"
     echo -e "${BLUE}    Matrix Dendrite 部署脚本${NC}"
@@ -25,33 +25,58 @@ show_menu() {
     echo -e "${BLUE}======================================${NC}"
 }
 
-# 检查服务状态函数
+# 检查服务状态
 check_service_status() {
     echo -e "${YELLOW}检查服务状态...${NC}"
-
     cd /opt/dendrite
-
+    # 容器状态
     echo -e "${BLUE}容器状态:${NC}"
-    docker-compose ps || docker compose ps
-
+    if docker compose version &>/dev/null; then
+        docker compose ps
+    else
+        docker-compose ps
+    fi
+    # PostgreSQL 日志
     echo -e "${BLUE}PostgreSQL 日志 (最后20行):${NC}"
-    docker-compose logs postgres --tail=20 || docker compose logs --tail=20 postgres
-
+    if docker compose version &>/dev/null; then
+        docker compose logs postgres --tail 20
+    else
+        docker-compose logs postgres --tail 20
+    fi
+    # Dendrite 日志
     echo -e "${BLUE}Dendrite 日志 (最后30行):${NC}"
-    docker-compose logs dendrite --tail=30 || docker compose logs --tail=30 dendrite
-
+    if docker compose version &>/dev/null; then
+        docker compose logs dendrite --tail 30
+    else
+        docker-compose logs dendrite --tail 30
+    fi
+    # 端口
     echo -e "${BLUE}端口监听状态:${NC}"
     netstat -tlnp | grep -E ':(8008|8448|5432)' || echo "相关端口未监听"
 }
 
-# 安装函数
+# 检查 PEM 私钥是否可读，否则重新生成
+check_or_generate_key() {
+    if [ ! -f "$CONFIG_DIR/matrix_key.pem" ] || ! openssl pkey -in "$CONFIG_DIR/matrix_key.pem" -check &>/dev/null; then
+        echo -e "${YELLOW}PEM 私钥缺失或不可读，重新生成...${NC}"
+        rm -f "$CONFIG_DIR/matrix_key.pem" "$CONFIG_DIR/matrix_key.pem.pub" 2>/dev/null || true
+        ssh-keygen -t ed25519 -m PEM -f "$CONFIG_DIR/matrix_key.pem" -N ""
+        chmod 600 "$CONFIG_DIR/matrix_key.pem"
+        echo -e "${GREEN}PEM 私钥生成完成${NC}"
+    else
+        echo -e "${GREEN}PEM 私钥存在且可读${NC}"
+    fi
+}
+
+# 安装 Dendrite
 install_dendrite() {
     echo -e "${GREEN}[开始安装 Dendrite]${NC}"
-
+    
     mkdir -p "$LOG_DIR" "$CONFIG_DIR" "$DATA_DIR/postgres" "$DATA_DIR/media_store" "$CERT_DIR"
     exec > >(tee -a "$LOG_DIR/install.log") 2>&1
 
     VPS_IP=$(curl -s ifconfig.me)
+
     read -p "请输入域名或 VPS IP (回车自动使用 VPS IP: $VPS_IP): " DOMAIN
     DOMAIN=${DOMAIN:-$VPS_IP}
 
@@ -74,6 +99,7 @@ install_dendrite() {
     echo "管理员密码: $ADMIN_PASS"
     echo "======================================"
 
+    # 系统检查
     if ! grep -q "Ubuntu" /etc/os-release; then
         echo -e "${RED}脚本仅支持 Ubuntu 系统${NC}"
         exit 1
@@ -97,12 +123,11 @@ install_dendrite() {
     chown -R $(whoami):$(whoami) "/opt/dendrite"
     chmod -R 755 "$CONFIG_DIR"
 
-    # 生成符合 Dendrite 要求的 ED25519 私钥
-    echo "[2/7] 生成 Dendrite 私钥 (ED25519 PEM)"
-    ssh-keygen -t ed25519 -m PEM -f "$CONFIG_DIR/matrix_key.pem" -N ""
-    chmod 600 "$CONFIG_DIR/matrix_key.pem"
+    # 生成或检查 PEM 私钥
+    echo "[2/7] 检查/生成 Dendrite 私钥 (ED25519 PEM)"
+    check_or_generate_key
 
-    # 创建配置文件
+    # 配置文件
     echo "[3/7] 创建 Dendrite 配置文件"
     cat > "$CONFIG_DIR/dendrite.yaml" <<EOF
 global:
@@ -153,17 +178,17 @@ logging:
     path: /var/log/dendrite.log
 EOF
 
-    # 创建 Docker Compose 文件
-    echo "[4/7] 创建 Docker Compose 配置"
+    # Docker Compose
+    echo "[4/7] 创建 Docker Compose 文件"
     cat > /opt/dendrite/docker-compose.yml <<EOF
 version: '3.7'
 services:
   postgres:
     image: postgres:15
     environment:
-      - POSTGRES_USER=dendrite
-      - POSTGRES_PASSWORD=$DB_PASS
-      - POSTGRES_DB=dendrite
+      POSTGRES_USER: dendrite
+      POSTGRES_PASSWORD: $DB_PASS
+      POSTGRES_DB: dendrite
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     restart: unless-stopped
@@ -182,40 +207,38 @@ services:
       - "8008:8008"
       - "8448:8448"
     volumes:
-      - ./config:/etc/dendrite
+      - ./config:/etc/dendrite:ro
       - ./data/media_store:/etc/dendrite/media_store
       - ./logs:/var/log
-    command: /usr/bin/dendrite-monolith --config /etc/dendrite/dendrite.yaml
+    command: ["/usr/bin/dendrite-monolith", "--config", "/etc/dendrite/dendrite.yaml"]
     restart: unless-stopped
 EOF
 
-    # 启动服务
     echo "[5/7] 启动服务"
     cd /opt/dendrite
-    docker-compose down -v || docker compose down -v || true
-    docker-compose up -d || docker compose up -d
+    if docker compose version &>/dev/null; then
+        docker compose down -v || true
+        docker compose up -d
+    else
+        docker-compose down -v || true
+        docker-compose up -d
+    fi
 
     echo "开始智能等待 Dendrite 健康并创建管理员账号..."
     for i in {1..12}; do
+        if docker compose version &>/dev/null; then
+            STATUS=$(docker compose ps dendrite | grep dendrite | awk '{print $5}')
+        else
+            STATUS=$(docker-compose ps dendrite | grep dendrite | awk '{print $5}')
+        fi
+        echo "当前 Dendrite 健康状态: $STATUS"
+        if [[ "$STATUS" == "Up" ]]; then
+            echo "尝试创建管理员账号..."
+            docker compose exec -T dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin 2>/dev/null && break
+        fi
         sleep 5
-        HEALTH=$(docker inspect -f '{{.State.Health.Status}}' dendrite_dendrite_1 2>/dev/null || echo "none")
-        echo "当前 Dendrite 健康状态: $HEALTH"
-
-        if [[ "$HEALTH" == "healthy" ]]; then
-            if docker-compose exec -T dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin 2>/dev/null; then
-                echo "✅ 管理员账号创建成功"
-                break
-            fi
-        fi
-
-        if [ $i -eq 6 ]; then
-            echo -e "${YELLOW}中间检查点 - 当前服务状态:${NC}"
-            docker-compose ps || docker compose ps
-            docker-compose logs dendrite --tail=10 || docker compose logs --tail=10 dendrite
-        fi
     done
 
-    # 配置 Nginx
     echo "[6/7] 配置 Nginx"
     NGINX_CONF="/etc/nginx/sites-available/dendrite.conf"
     cat > $NGINX_CONF <<NGX
@@ -236,17 +259,13 @@ NGX
     nginx -t && systemctl reload nginx
 
     if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
-        echo "申请 Let's Encrypt SSL 证书..."
+        echo "申请 SSL..."
         certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m admin@"$DOMAIN" || \
-        echo "Certbot 证书申请失败，请检查域名解析"
+        echo "Certbot 申请失败，请检查域名解析"
     fi
 
     echo "======================================"
-    if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
-        echo "访问地址: https://$DOMAIN"
-    else
-        echo "HTTP 地址: http://$DOMAIN"
-    fi
+    echo "HTTP/HTTPS 地址: $DOMAIN"
     echo "管理员账号: $ADMIN_USER"
     echo "管理员密码: $ADMIN_PASS"
     echo "数据库密码: $DB_PASS"
@@ -256,31 +275,28 @@ NGX
     echo -e "${GREEN}[安装完成]${NC}"
 }
 
-# 重新安装函数
+# 重新安装
 reinstall_dendrite() {
     echo -e "${YELLOW}[开始重新安装 Dendrite]${NC}"
-
-    read -p "重新安装将删除所有现有数据，是否继续? (y/N): " confirm
+    read -p "重新安装将删除现有数据，是否继续? (y/N): " confirm
     if [[ ! $confirm =~ ^[Yy]$ ]]; then
         echo -e "${YELLOW}已取消重新安装${NC}"
         return
     fi
-
     if [ -d "/opt/dendrite" ]; then
         BACKUP_DIR="/opt/dendrite_backup_$(date +%Y%m%d_%H%M%S)"
         mkdir -p "$BACKUP_DIR"
-        echo "备份现有配置到: $BACKUP_DIR"
         cp -r /opt/dendrite/config/* "$BACKUP_DIR/" 2>/dev/null || true
-
-        echo "停止并删除现有容器..."
         cd /opt/dendrite
-        docker-compose down -v || docker compose down -v || true
+        if docker compose version &>/dev/null; then
+            docker compose down -v || true
+        else
+            docker-compose down -v || true
+        fi
     fi
-
     echo "清理旧数据..."
     cd /opt
     rm -rf dendrite
-
     install_dendrite
 }
 
@@ -288,22 +304,10 @@ reinstall_dendrite() {
 while true; do
     show_menu
     read -p "请选择操作 [0-2]: " choice
-
     case $choice in
-        1)
-            install_dendrite
-            break
-            ;;
-        2)
-            reinstall_dendrite
-            break
-            ;;
-        0)
-            echo -e "${BLUE}退出脚本${NC}"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}无效选择，请重新输入${NC}"
-            ;;
+        1) install_dendrite; break ;;
+        2) reinstall_dendrite; break ;;
+        0) echo -e "${BLUE}退出脚本${NC}"; exit 0 ;;
+        *) echo -e "${RED}无效选择，请重新输入${NC}" ;;
     esac
 done
