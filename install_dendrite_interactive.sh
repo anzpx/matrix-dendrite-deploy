@@ -1,130 +1,88 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# ================================
+# 一键安装 Docker + Dendrite
+# ================================
+
 set -e
 
-# ===============================
-# Matrix Dendrite 一键部署脚本
-# ===============================
+echo "==> 更新系统并安装依赖..."
+sudo apt update
+sudo apt install -y ca-certificates curl gnupg lsb-release sudo
 
-# 配置变量
-DENDRITE_DIR="/opt/dendrite"
-CONFIG_DIR="$DENDRITE_DIR/config"
-DATA_DIR="$DENDRITE_DIR/data"
-MEDIA_DIR="$DATA_DIR/media_store"
-DB_DIR="$DATA_DIR/db"
+echo "==> 添加 Docker 官方 GPG 密钥和源..."
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo \
+"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+$(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-# 提示用户输入
-read -rp "请输入域名或 VPS IP (回车使用 localhost): " SERVER_NAME
-SERVER_NAME=${SERVER_NAME:-localhost}
+echo "==> 安装 Docker 及 Docker Compose 插件..."
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-read -rp "请输入 PostgreSQL 用户名 (回车使用 dendrite): " DB_USER
-DB_USER=${DB_USER:-dendrite}
+echo "==> 启动 Docker 服务..."
+sudo systemctl enable docker
+sudo systemctl start docker
+sudo systemctl status docker --no-pager
 
-read -rp "请输入 PostgreSQL 密码 (回车随机生成): " DB_PASS
-if [ -z "$DB_PASS" ]; then
-    DB_PASS=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 16)
-fi
+echo "==> 创建 Dendrite 目录结构..."
+sudo mkdir -p /opt/dendrite/config /opt/dendrite/data/db /opt/dendrite/data/media_store
+sudo chown -R $USER:$USER /opt/dendrite
 
-read -rp "请输入管理员用户名 (回车随机生成): " ADMIN_USER
-if [ -z "$ADMIN_USER" ]; then
-    ADMIN_USER="admin_$(head /dev/urandom | tr -dc a-f0-9 | head -c 10)"
-fi
+echo "==> 生成 Dendrite 私钥..."
+openssl genpkey -algorithm ED25519 -out /opt/dendrite/config/matrix_key.pem
+openssl pkey -in /opt/dendrite/config/matrix_key.pem -pubout -out /opt/dendrite/config/matrix_key.pem.pub
 
-read -rp "请输入管理员密码 (回车随机生成): " ADMIN_PASS
-if [ -z "$ADMIN_PASS" ]; then
-    ADMIN_PASS=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 16)
-fi
+echo "==> 生成自签名证书..."
+sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+ -keyout /opt/dendrite/config/selfsigned.key \
+ -out /opt/dendrite/config/selfsigned.crt \
+ -subj "/CN=localhost"
 
-echo "======================================"
-echo "配置如下:"
-echo "域名/IP: $SERVER_NAME"
-echo "数据库用户: $DB_USER"
-echo "数据库密码: $DB_PASS"
-echo "管理员账号: $ADMIN_USER"
-echo "管理员密码: $ADMIN_PASS"
-echo "======================================"
-
-# 创建目录
-mkdir -p "$CONFIG_DIR" "$MEDIA_DIR" "$DB_DIR"
-
-# 安装依赖
-apt update
-apt install -y curl docker.io nginx openssl python3-certbot-nginx git
-
-# 安装 Docker Compose
-if ! command -v docker-compose &>/dev/null; then
-    echo "[INFO] 安装 Docker Compose..."
-    curl -SL https://github.com/docker/compose/releases/download/v2.28.2/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
-    chmod +x /usr/local/bin/docker-compose
-fi
-
-# 生成 Dendrite 私钥
-if [ ! -f "$CONFIG_DIR/matrix_key.pem" ]; then
-    echo "[INFO] 生成 Dendrite 私钥..."
-    ssh-keygen -t ed25519 -f "$CONFIG_DIR/matrix_key.pem" -N ""
-fi
-
-# 生成自签名证书
-echo "[INFO] 生成自签名证书..."
-mkdir -p "$DENDRITE_DIR/certs"
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-    -keyout "$DENDRITE_DIR/certs/selfsigned.key" \
-    -out "$DENDRITE_DIR/certs/selfsigned.crt" \
-    -subj "/CN=$SERVER_NAME"
-
-# 生成 dendrite.yaml
-cat > "$CONFIG_DIR/dendrite.yaml" << EOF
+echo "==> 生成 dendrite.yaml..."
+cat > /opt/dendrite/config/dendrite.yaml <<'EOF'
 version: 2
 global:
-  server_name: "$SERVER_NAME"
+  server_name: "localhost"
   private_key: "/etc/dendrite/matrix_key.pem"
   database:
-    connection_string: "postgres://$DB_USER:$DB_PASS@db/$DB_USER?sslmode=disable"
+    connection_string: "postgres://dendrite:password@db/dendrite?sslmode=disable"
   media_api:
     base_path: "/var/dendrite/media_store"
 EOF
 
-# 生成 docker-compose.yml
-cat > "$DENDRITE_DIR/docker-compose.yml" << EOF
-version: "3.9"
+echo "==> 生成 docker-compose.yml..."
+cat > /opt/dendrite/docker-compose.yml <<'EOF'
+version: "3.8"
 services:
   db:
     image: postgres:14
     container_name: dendrite_db
+    restart: always
     environment:
-      POSTGRES_USER: $DB_USER
-      POSTGRES_PASSWORD: $DB_PASS
-      POSTGRES_DB: $DB_USER
+      POSTGRES_USER: dendrite
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: dendrite
     volumes:
-      - $DB_DIR:/var/lib/postgresql/data
-    restart: unless-stopped
-
+      - ./data/db:/var/lib/postgresql/data
   dendrite:
     image: ghcr.io/matrix-org/dendrite-monolith:latest
     container_name: dendrite
+    restart: always
     depends_on:
       - db
     ports:
       - "8008:8008"
       - "8448:8448"
     volumes:
-      - $CONFIG_DIR:/etc/dendrite
-      - $MEDIA_DIR:/var/dendrite/media_store
-    restart: unless-stopped
+      - ./config:/etc/dendrite
+      - ./data/media_store:/var/dendrite/media_store
 EOF
 
-# 启动容器
-echo "[INFO] 启动容器..."
-docker-compose -f "$DENDRITE_DIR/docker-compose.yml" down || true
-docker-compose -f "$DENDRITE_DIR/docker-compose.yml" up -d
+echo "==> 启动 Dendrite..."
+cd /opt/dendrite
+docker compose up -d
 
-# 显示状态
+echo "==> 安装完成，检查容器状态..."
 docker ps
-
-echo "======================================"
-echo "部署完成!"
-echo "访问 HTTP/HTTPS 地址: $SERVER_NAME:8008 / $SERVER_NAME:8448"
-echo "管理员账号: $ADMIN_USER"
-echo "管理员密码: $ADMIN_PASS"
-echo "数据库用户名: $DB_USER"
-echo "数据库密码: $DB_PASS"
-echo "======================================"
+echo "==> 你可以通过 http://localhost:8008/_matrix/client/versions 检查服务是否启动"
