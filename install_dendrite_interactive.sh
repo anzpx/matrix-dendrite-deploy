@@ -91,31 +91,31 @@ database:
 
 app_service_api:
   internal_api:
-    connect: http://localhost:7777
+    connect: http://dendrite:7777
     listen: http://0.0.0.0:7777
 
 client_api:
   internal_api:
-    connect: http://localhost:7771
+    connect: http://dendrite:7771
     listen: http://0.0.0.0:7771
   external_api:
     listen: http://0.0.0.0:8008
 
 federation_api:
   internal_api:
-    connect: http://localhost:7772
+    connect: http://dendrite:7772
     listen: http://0.0.0.0:7772
   external_api:
     listen: http://0.0.0.0:8448
 
 key_server:
   internal_api:
-    connect: http://localhost:7774
+    connect: http://dendrite:7774
     listen: http://0.0.0.0:7774
 
 media_api:
   internal_api:
-    connect: http://localhost:7775
+    connect: http://dendrite:7775
     listen: http://0.0.0.0:7775
   external_api:
     listen: http://0.0.0.0:8075
@@ -123,17 +123,17 @@ media_api:
 
 room_server:
   internal_api:
-    connect: http://localhost:7773
+    connect: http://dendrite:7773
     listen: http://0.0.0.0:7773
 
 sync_api:
   internal_api:
-    connect: http://localhost:7773
+    connect: http://dendrite:7773
     listen: http://0.0.0.0:7773
 
 user_api:
   internal_api:
-    connect: http://localhost:7781
+    connect: http://dendrite:7781
     listen: http://0.0.0.0:7781
   account_database:
     connection_string: postgres://dendrite:$DB_PASS@postgres:5432/dendrite?sslmode=disable
@@ -182,6 +182,12 @@ services:
       - "--config"
       - "/etc/dendrite/dendrite.yaml"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8008/_matrix/client/versions"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 EOF
 
 # 启动服务
@@ -190,29 +196,36 @@ cd /opt/dendrite
 docker-compose down -v || true
 docker-compose up -d
 
+# 等待服务完全启动
+echo "等待服务启动..."
+sleep 30
+
 # 等待 Dendrite 容器健康
 echo "等待 Dendrite 容器健康..."
-for i in {1..30}; do
-    STATUS=$(docker inspect -f '{{.State.Health.Status}}' dendrite_dendrite_1 2>/dev/null || echo "unknown")
-    if [[ "$STATUS" == "healthy" ]]; then
-        echo "✅ Dendrite 容器已启动"
+for i in {1..60}; do
+    if docker-compose exec -T dendrite curl -f http://localhost:8008/_matrix/client/versions > /dev/null 2>&1; then
+        echo "✅ Dendrite 服务已就绪"
         break
     fi
-    echo "等待 Dendrite 服务就绪... ($i/30)"
+    echo "等待 Dendrite 服务就绪... ($i/60)"
     sleep 5
 done
 
-# 创建管理员账号，最多重试10次
+# 创建管理员账号，最多重试20次
 echo "[6/7] 创建管理员账号"
-for i in {1..10}; do
+for i in {1..20}; do
     if docker-compose exec -T dendrite \
         /usr/bin/create-account --config /etc/dendrite/dendrite.yaml \
         --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin 2>/dev/null; then
         echo "✅ 管理员账号创建成功"
         break
     else
-        echo "⚠️ 管理员账号创建失败，等待重试... ($i/10)"
-        sleep 5
+        echo "⚠️ 管理员账号创建失败，等待重试... ($i/20)"
+        sleep 10
+    fi
+    if [ $i -eq 20 ]; then
+        echo "❌ 管理员账号创建失败，请手动执行以下命令："
+        echo "cd /opt/dendrite && docker-compose exec dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml --username \"$ADMIN_USER\" --password \"$ADMIN_PASS\" --admin"
     fi
 done
 
