@@ -13,6 +13,10 @@
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/install_dendrite_interactive.sh)"
 ```
 
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/install.sh)"
+```
+
 执行后会依次提示输入：
 1. 域名或 VPS IP
 2. PostgreSQL 数据库密码
