@@ -1,43 +1,21 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
-# =========================
-# Matrix Dendrite 一键部署
-# 增强：自动检测并清理残留 Docker 容器 / 网络
-# =========================
-
-BASE_DIR="/opt/dendrite"
-LOG_DIR="$BASE_DIR/logs"
-CONFIG_DIR="$BASE_DIR/config"
-DATA_DIR="$BASE_DIR/data"
+# 日志和目录
+LOG_DIR="/opt/dendrite/logs"
+CONFIG_DIR="/opt/dendrite/config"
+DATA_DIR="/opt/dendrite/data"
 MEDIA_DIR="$DATA_DIR/media_store"
-CERT_DIR="$BASE_DIR/certs"
-COMPOSE_FILE="$BASE_DIR/docker-compose.yml"
+CERT_DIR="/opt/dendrite/certs"
 
-# Colors
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-trap 'on_exit $?' EXIT
-
-on_exit() {
-    local rc=$1
-    if [ "$rc" -ne 0 ]; then
-        echo -e "${RED}脚本执行失败（exit code $rc）。打印最近日志以便排查：${NC}"
-        if [ -f "$COMPOSE_FILE" ]; then
-            echo -e "${YELLOW}== docker-compose ps ==${NC}"
-            (cd "$BASE_DIR" && docker-compose ps) || true
-            echo -e "${YELLOW}== dendrite logs (tail 100) ==${NC}"
-            (cd "$BASE_DIR" && docker-compose logs dendrite --tail=100) || true
-            echo -e "${YELLOW}== postgres logs (tail 100) ==${NC}"
-            (cd "$BASE_DIR" && docker-compose logs postgres --tail=100) || true
-        else
-            echo -e "${YELLOW}docker-compose.yml 不存在，列出含 'dendrite' 名称的容器：${NC}"
-            docker ps -a --filter "name=dendrite" || true
-        fi
-    fi
-    exit "$rc"
-}
-
+# 显示菜单
 show_menu() {
     echo -e "${BLUE}======================================${NC}"
     echo -e "${BLUE}    Matrix Dendrite 自动部署脚本${NC}"
@@ -48,116 +26,61 @@ show_menu() {
     echo -e "${BLUE}======================================${NC}"
 }
 
-# 清理残留容器/网络（安全：仅删除名字包含 dendrite 的容器与 dendrite_default 网络）
-clean_previous_environment() {
-    echo -e "${YELLOW}检测并清理残留的 dendrite 容器/网络（如果存在）...${NC}"
-
-    # 如果有 /opt/dendrite/docker-compose.yml，优先使用 docker-compose down -v
-    if [ -f "$COMPOSE_FILE" ]; then
-        echo "- 发现 $COMPOSE_FILE，执行 docker-compose down -v"
-        (cd "$BASE_DIR" && docker-compose down -v) || echo "- docker-compose down 失败，继续后续清理"
-    fi
-
-    # 强制删除所有名字中包含 dendrite 的容器（谨慎）
-    local cids
-    cids=$(docker ps -a --filter "name=dendrite" -q || true)
-    if [ -n "$cids" ]; then
-        echo "- 删除残留容器: $cids"
-        docker rm -f $cids || true
-    else
-        echo "- 无残留 dendrite 容器"
-    fi
-
-    # 删除名为 dendrite_default 的网络（如果存在）
-    if docker network ls --format '{{.Name}}' | grep -q '^dendrite_default$'; then
-        echo "- 删除网络 dendrite_default"
-        docker network rm dendrite_default || true
-    else
-        echo "- 无 dendrite_default 网络"
-    fi
-
-    echo -e "${GREEN}残留环境清理完成${NC}"
+# 检查服务状态
+check_service_status() {
+    echo -e "${YELLOW}检查服务状态...${NC}"
+    cd /opt/dendrite
+    echo -e "${BLUE}容器状态:${NC}"
+    docker-compose ps
+    echo -e "${BLUE}PostgreSQL 日志 (最后20行):${NC}"
+    docker-compose logs --tail=20 postgres
+    echo -e "${BLUE}Dendrite 日志 (最后30行):${NC}"
+    docker-compose logs --tail=30 dendrite
+    echo -e "${BLUE}端口监听状态:${NC}"
+    netstat -tlnp | grep -E ':(8008|8448|5432)' || echo "相关端口未监听"
 }
 
-check_docker_available() {
-    if ! command -v docker >/dev/null 2>&1; then
-        echo -e "${RED}错误：系统未安装 docker，请先安装${NC}"
-        exit 1
-    fi
-    if ! docker info >/dev/null 2>&1; then
-        echo -e "${RED}错误：docker 未正常运行，请启动 docker 服务${NC}"
-        exit 1
-    fi
-}
-
-# 等待并打印失败日志（Postgres）
+# 等待 PostgreSQL 就绪
 wait_for_postgres() {
     echo "[*] 等待 PostgreSQL 就绪..."
-    local timeout=60 elapsed=0
-    while :; do
-        if docker-compose exec -T postgres pg_isready -U dendrite -d dendrite >/dev/null 2>&1; then
-            echo "PostgreSQL 已就绪"
-            return 0
-        fi
-        if [ "$elapsed" -ge "$timeout" ]; then
-            echo -e "${RED}PostgreSQL 启动超时 (${timeout}s)。打印日志：${NC}"
-            docker-compose logs postgres --tail=200 || true
-            return 1
-        fi
+    until docker-compose exec -T postgres pg_isready -U dendrite -d dendrite >/dev/null 2>&1; do
         echo "PostgreSQL 未就绪，等待 5 秒..."
         sleep 5
-        elapsed=$((elapsed+5))
     done
+    echo "PostgreSQL 已就绪"
 }
 
-# 等待 dendrite 容器就绪（尝试执行一个简短命令）
+# 等待 Dendrite 就绪
 wait_for_dendrite() {
     echo "[*] 等待 Dendrite 容器就绪..."
-    local timeout=90 elapsed=0
-    while :; do
-        # 如果容器不存在或在重启中，会导致 docker-compose exec 返回错误
-        if docker-compose ps | grep -q 'dendrite'; then
-            if docker-compose exec -T dendrite /usr/bin/dendrite-monolith --version >/dev/null 2>&1; then
-                echo "Dendrite 已就绪"
-                return 0
-            fi
-        else
-            echo "Dendrite 容器尚未创建"
-        fi
-
-        if [ "$elapsed" -ge "$timeout" ]; then
-            echo -e "${RED}Dendrite 启动超时 (${timeout}s)。打印日志并退出：${NC}"
-            docker-compose ps || true
-            docker-compose logs dendrite --tail=200 || true
-            return 1
-        fi
-
+    RETRIES=0
+    MAX_RETRIES=30
+    while ! docker-compose exec -T dendrite /usr/bin/dendrite-monolith --version >/dev/null 2>&1; do
+        RETRIES=$((RETRIES+1))
         echo "Dendrite 容器未就绪，等待 5 秒..."
         sleep 5
-        elapsed=$((elapsed+5))
+        if [ $RETRIES -ge $MAX_RETRIES ]; then
+            echo -e "${RED}Dendrite 容器长时间未就绪，请检查日志${NC}"
+            docker-compose logs --tail=100 dendrite
+            exit 1
+        fi
     done
+    echo "Dendrite 已就绪"
 }
 
-# 主安装流程
+# 安装函数
 install_dendrite() {
     echo -e "${GREEN}[开始安装 Dendrite]${NC}"
 
-    # 先检查 docker
-    check_docker_available
-
     # 创建目录并设置权限
-    mkdir -p "$LOG_DIR" "$CONFIG_DIR" "$DATA_DIR/postgres" "$MEDIA_DIR" "$CERT_DIR"
-    # media 目录必须为容器可写
-    chmod 0777 "$MEDIA_DIR" || true
-    chmod 0755 "$CONFIG_DIR" || true
-    chmod 0755 "$LOG_DIR" || true
+    mkdir -p "$LOG_DIR" "$CONFIG_DIR" "$MEDIA_DIR" "$CERT_DIR"
+    chmod -R 755 "$CONFIG_DIR" "$LOG_DIR"
+    chmod -R 777 "$MEDIA_DIR"
 
-    # 启动日志收集（并记录本次运行日志）
     exec > >(tee -a "$LOG_DIR/install.log") 2>&1
 
-    # 读取用户输入
-    VPS_IP=$(curl -s ifconfig.me || echo "")
-    read -p "请输入域名或 VPS IP (回车自动使用 VPS IP: ${VPS_IP}): " DOMAIN
+    VPS_IP=$(curl -s ifconfig.me)
+    read -p "请输入域名或 VPS IP (回车自动使用 VPS IP: $VPS_IP): " DOMAIN
     DOMAIN=${DOMAIN:-$VPS_IP}
 
     read -s -p "请输入 PostgreSQL 数据库密码 (回车随机生成): " DB_PASS
@@ -173,36 +96,32 @@ install_dendrite() {
 
     echo
     echo "使用配置如下:"
-    echo "  域名/IP: $DOMAIN"
-    echo "  数据库密码: $DB_PASS"
-    echo "  管理员账号: $ADMIN_USER"
-    echo "  管理员密码: $ADMIN_PASS"
+    echo "域名/IP: $DOMAIN"
+    echo "数据库密码: $DB_PASS"
+    echo "管理员账号: $ADMIN_USER"
+    echo "管理员密码: $ADMIN_PASS"
     echo "======================================"
 
-    echo "[1/7] 安装系统依赖（docker / docker-compose / nginx / certbot / openssl / dnsutils）"
+    echo "[1/7] 安装依赖"
     apt update -y
     apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx openssl dnsutils curl
     systemctl enable --now docker
 
-    # 检查并清理残留环境（会自动删除名字含 'dendrite' 的容器和网络）
-    clean_previous_environment
-
-    # 检查域名解析
-    DNS_IP=$(dig +short "$DOMAIN" | head -n1 || echo "")
+    DNS_IP=$(dig +short "$DOMAIN" | head -n1)
     USE_LETSENCRYPT="no"
-    if [[ -n "$DNS_IP" && "$DNS_IP" == "$VPS_IP" && "$DOMAIN" != "$VPS_IP" ]]; then
-        echo "✅ 域名解析到 VPS，启用 Let's Encrypt"
+    if [[ "$DNS_IP" == "$VPS_IP" ]] && [[ "$DOMAIN" != "$VPS_IP" ]]; then
+        echo "✅ 域名解析正确，启用 Let's Encrypt"
         USE_LETSENCRYPT="yes"
     else
-        echo "⚠️ 域名未解析到 VPS 公网 IP，将使用 VPS IP 或自签名证书"
+        echo "⚠️ 域名未解析到 VPS 公网 IP，将使用自签名证书"
         DOMAIN="$VPS_IP"
     fi
 
-    echo "[2/7] 生成私钥（ED25519）并设置容器可读权限"
+    echo "[2/7] 生成私钥"
     openssl genpkey -algorithm ED25519 -out "$CONFIG_DIR/matrix_key.pem"
-    chmod 0644 "$CONFIG_DIR/matrix_key.pem" || true
+    chmod 644 "$CONFIG_DIR/matrix_key.pem"
 
-    echo "[3/7] 生成配置文件 dendrite.yaml"
+    echo "[3/7] 创建 Dendrite 配置文件"
     cat > "$CONFIG_DIR/dendrite.yaml" <<EOF
 global:
   server_name: $DOMAIN
@@ -252,8 +171,8 @@ logging:
     path: /var/log/dendrite.log
 EOF
 
-    echo "[4/7] 生成 docker-compose.yml"
-    cat > "$COMPOSE_FILE" <<EOF
+    echo "[4/7] 创建 Docker Compose 文件"
+    cat > /opt/dendrite/docker-compose.yml <<EOF
 version: '3.7'
 services:
   postgres:
@@ -266,7 +185,7 @@ services:
       - ./data/postgres:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL","pg_isready -U dendrite -d dendrite"]
+      test: ["CMD-SHELL", "pg_isready -U dendrite -d dendrite"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -286,34 +205,22 @@ services:
     restart: unless-stopped
 EOF
 
-    echo "[5/7] 启动服务 (docker-compose up -d)"
-    cd "$BASE_DIR"
+    echo "[5/7] 启动服务"
+    cd /opt/dendrite
     docker-compose down -v || true
     docker-compose up -d
 
-    echo "[*] 等待 PostgreSQL 就绪并检查"
-    if ! wait_for_postgres; then
-        echo -e "${RED}Postgres 未能启动，检查以上日志并修复后重试${NC}"
-        exit 1
-    fi
-
-    echo "[*] 等待 Dendrite 就绪并检查"
-    if ! wait_for_dendrite; then
-        echo -e "${RED}Dendrite 未能启动，检查以上日志并修复后重试${NC}"
-        exit 1
-    fi
+    wait_for_postgres
+    wait_for_dendrite
 
     echo "[6/7] 创建管理员账号"
-    if docker-compose exec -T dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin >/dev/null 2>&1; then
-        echo -e "${GREEN}管理员账号创建成功：${NC} $ADMIN_USER"
-    else
-        echo -e "${YELLOW}尝试创建管理员账号失败，可能已经存在或容器未完全就绪，打印最近日志：${NC}"
-        docker-compose logs dendrite --tail=200 || true
-    fi
+    docker-compose exec -T dendrite \
+        /usr/bin/create-account --config /etc/dendrite/dendrite.yaml \
+        --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin
 
-    echo "[7/7] 配置 Nginx (HTTP)"
+    echo "[7/7] 配置 Nginx"
     NGINX_CONF="/etc/nginx/sites-available/dendrite.conf"
-    cat > "$NGINX_CONF" <<NGX
+    cat > $NGINX_CONF <<NGX
 server {
     listen 80;
     server_name $DOMAIN;
@@ -326,7 +233,7 @@ server {
     }
 }
 NGX
-    ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/
+    ln -sf $NGINX_CONF /etc/nginx/sites-enabled/
     rm -f /etc/nginx/sites-enabled/default
     nginx -t && systemctl reload nginx
 
@@ -341,29 +248,29 @@ NGX
     echo "管理员密码: $ADMIN_PASS"
     echo "数据库密码: $DB_PASS"
     echo "======================================"
-
-    echo -e "${GREEN}[安装完成]${NC}"
     check_service_status
+    echo -e "${GREEN}[安装完成]${NC}"
 }
 
+# 重新安装
 reinstall_dendrite() {
     echo -e "${YELLOW}[开始重新安装 Dendrite]${NC}"
     read -p "重新安装将删除所有现有数据，是否继续? (y/N): " confirm
     if [[ ! $confirm =~ ^[Yy]$ ]]; then
         echo -e "${YELLOW}已取消重新安装${NC}"
-        return 0
+        return
     fi
 
-    if [ -d "$BASE_DIR" ]; then
-        BACKUP_DIR="${BASE_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
+    if [ -d "/opt/dendrite" ]; then
+        BACKUP_DIR="/opt/dendrite_backup_$(date +%Y%m%d_%H%M%S)"
         mkdir -p "$BACKUP_DIR"
-        echo "- 备份现有配置到: $BACKUP_DIR"
-        cp -r "$CONFIG_DIR"/* "$BACKUP_DIR/" 2>/dev/null || true
-        (cd "$BASE_DIR" && docker-compose down -v) || true
+        echo "备份现有配置到: $BACKUP_DIR"
+        cp -r /opt/dendrite/config/* "$BACKUP_DIR/" 2>/dev/null || true
+        cd /opt/dendrite
+        docker-compose down -v || true
     fi
 
-    echo "- 清理旧目录"
-    rm -rf "$BASE_DIR"
+    rm -rf /opt/dendrite
     install_dendrite
 }
 
