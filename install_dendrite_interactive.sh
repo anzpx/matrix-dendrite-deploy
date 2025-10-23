@@ -1,130 +1,220 @@
 #!/bin/bash
 # ======================================
-# Matrix Dendrite 部署脚本（修正版）
+# Matrix Dendrite 一键部署脚本
+# 支持 Ubuntu 22.04，解决 media_store 挂载和私钥问题
 # ======================================
 
 set -e
 
-INSTALL_DIR="/opt/dendrite"
-CONFIG_DIR="$INSTALL_DIR/config"
-CERT_DIR="$INSTALL_DIR/certs"
+BASE_DIR="/opt/dendrite"
+CONFIG_DIR="$BASE_DIR/config"
+DATA_DIR="$BASE_DIR/data"
+MEDIA_DIR="$DATA_DIR/media_store"
+CERT_DIR="$BASE_DIR/certs"
 
-# 创建目录
-mkdir -p "$CONFIG_DIR" "$CERT_DIR"
+# -------------------------------
+# 工具函数
+# -------------------------------
+log() { echo -e "[\033[1;32mINFO\033[0m] $*"; }
+err() { echo -e "[\033[1;31mERROR\033[0m] $*" >&2; }
 
-# 用户输入
-read -p "请输入域名或 VPS IP (回车自动使用 VPS IP): " DOMAIN
-DOMAIN=${DOMAIN:-$(curl -s ifconfig.me)}
-
-read -p "请输入 PostgreSQL 数据库密码 (回车随机生成): " DB_PASS
-DB_PASS=${DB_PASS:-$(openssl rand -base64 12)}
-
-read -p "请输入管理员账号用户名 (回车随机生成): " ADMIN_USER
-ADMIN_USER=${ADMIN_USER:-user_$(openssl rand -hex 4)}
-
-read -p "请输入管理员账号密码 (回车随机生成): " ADMIN_PASS
-ADMIN_PASS=${ADMIN_PASS:-$(openssl rand -base64 12)}
-
-echo "使用配置如下:"
-echo "域名/IP: $DOMAIN"
-echo "数据库密码: $DB_PASS"
-echo "管理员账号: $ADMIN_USER"
-echo "管理员密码: $ADMIN_PASS"
-
-# --------------------------
+# -------------------------------
 # 安装依赖
-# --------------------------
-echo "[1/5] 安装依赖..."
-apt update
-apt install -y docker.io docker-compose curl nginx openssl python3-certbot-nginx dnsutils
+# -------------------------------
+install_dependencies() {
+    log "安装依赖..."
+    apt update
+    apt install -y docker.io docker-compose curl nginx openssl certbot python3-certbot-nginx dnsutils
+}
 
-# --------------------------
-# 生成 PEM Ed25519 私钥
-# --------------------------
-KEY_FILE="$CONFIG_DIR/matrix_key.pem"
-if [[ ! -f "$KEY_FILE" ]]; then
-    echo "[2/5] 生成 Dendrite PEM 私钥..."
-    ssh-keygen -t ed25519 -m PEM -f "$KEY_FILE" -N "" -q
-    chmod 600 "$KEY_FILE"
-    echo "PEM 私钥生成完成: $KEY_FILE"
-else
-    echo "[2/5] PEM 私钥已存在，跳过生成"
-fi
+# -------------------------------
+# 检查或生成私钥
+# -------------------------------
+generate_private_key() {
+    mkdir -p "$CONFIG_DIR"
+    KEY_FILE="$CONFIG_DIR/matrix_key.pem"
+    if [[ ! -f "$KEY_FILE" ]]; then
+        log "PEM 私钥缺失或不可读，重新生成..."
+        ssh-keygen -t ed25519 -f "$KEY_FILE" -N ""
+        log "PEM 私钥生成完成: $KEY_FILE"
+    else
+        log "PEM 私钥已存在: $KEY_FILE"
+    fi
+}
 
-# --------------------------
+# -------------------------------
+# 创建必要目录
+# -------------------------------
+prepare_directories() {
+    log "创建数据目录..."
+    mkdir -p "$MEDIA_DIR"
+    mkdir -p "$CERT_DIR"
+    chmod -R 777 "$BASE_DIR"
+}
+
+# -------------------------------
 # 生成自签名证书
-# --------------------------
-CRT_FILE="$CERT_DIR/selfsigned.crt"
-KEY_CERT_FILE="$CERT_DIR/selfsigned.key"
+# -------------------------------
+generate_self_signed_cert() {
+    if [[ ! -f "$CERT_DIR/selfsigned.crt" ]]; then
+        log "生成自签名证书..."
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout "$CERT_DIR/selfsigned.key" \
+            -out "$CERT_DIR/selfsigned.crt" \
+            -subj "/C=CN/ST=Beijing/L=Beijing/O=Matrix/CN=localhost"
+    fi
+}
 
-if [[ ! -f "$CRT_FILE" || ! -f "$KEY_CERT_FILE" ]]; then
-    echo "[3/5] 生成自签名证书..."
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-        -keyout "$KEY_CERT_FILE" \
-        -out "$CRT_FILE" \
-        -subj "/CN=$DOMAIN"
-    echo "自签名证书生成完成: $CRT_FILE"
-else
-    echo "[3/5] 自签名证书已存在，跳过生成"
-fi
-
-# --------------------------
+# -------------------------------
 # 生成 Dendrite 配置文件
-# --------------------------
-CONFIG_FILE="$CONFIG_DIR/dendrite.yaml"
-cat > "$CONFIG_FILE" <<EOF
-server_name: "$DOMAIN"
-private_key: "$KEY_FILE"
+# -------------------------------
+generate_dendrite_config() {
+    CONFIG_FILE="$CONFIG_DIR/dendrite.yaml"
+    cat > "$CONFIG_FILE" <<EOF
+global:
+  server_name: "${DOMAIN:-localhost}"
+  private_key_file: "$CONFIG_DIR/matrix_key.pem"
+
 database:
-  type: "postgres"
-  user: "postgres"
-  password: "$DB_PASS"
-  host: "postgres"
-  port: 5432
-  name: "dendrite"
+  connection_string: "postgres://$DB_USER:$DB_PASSWORD@postgres:5432/dendrite?sslmode=disable"
+
+media_api:
+  base_path: /media_store
 EOF
-echo "[4/5] Dendrite 配置文件生成完成: $CONFIG_FILE"
+    log "Dendrite 配置生成完成: $CONFIG_FILE"
+}
 
-# --------------------------
-# Docker Compose 文件
-# --------------------------
-DOCKER_FILE="$INSTALL_DIR/docker-compose.yml"
-cat > "$DOCKER_FILE" <<EOF
-version: '3.7'
-
+# -------------------------------
+# 生成 Docker Compose 文件
+# -------------------------------
+generate_docker_compose() {
+    COMPOSE_FILE="$BASE_DIR/docker-compose.yml"
+    cat > "$COMPOSE_FILE" <<EOF
+version: "3.8"
 services:
   postgres:
     image: postgres:15
     container_name: dendrite_postgres
-    restart: always
     environment:
-      POSTGRES_PASSWORD: $DB_PASS
+      POSTGRES_DB: dendrite
+      POSTGRES_USER: $DB_USER
+      POSTGRES_PASSWORD: $DB_PASSWORD
     volumes:
-      - ./pgdata:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $DB_USER"]
+      interval: 5s
+      retries: 5
 
   dendrite:
     image: matrixdotorg/dendrite:latest
     container_name: dendrite_dendrite
-    restart: always
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     volumes:
       - ./config:/etc/dendrite
-    environment:
-      DENDRITE_CONFIG: /etc/dendrite/dendrite.yaml
+      - ./data/media_store:/media_store
+    ports:
+      - "8008:8008"
+      - "8448:8448"
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:latest
+    container_name: dendrite_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./certs:/etc/nginx/certs
+      - ./config:/etc/dendrite
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - dendrite
 EOF
-echo "[5/5] Docker Compose 文件生成完成: $DOCKER_FILE"
+    log "Docker Compose 文件生成完成: $COMPOSE_FILE"
+}
 
-# --------------------------
-# 启动服务
-# --------------------------
-docker-compose -f "$DOCKER_FILE" down || true
-docker-compose -f "$DOCKER_FILE" up -d
+# -------------------------------
+# 生成 Nginx 配置
+# -------------------------------
+generate_nginx_config() {
+    NGINX_FILE="$BASE_DIR/nginx.conf"
+    cat > "$NGINX_FILE" <<EOF
+events {}
+http {
+    server {
+        listen 80;
+        server_name ${DOMAIN:-localhost};
+        return 301 https://\$host\$request_uri;
+    }
 
+    server {
+        listen 443 ssl;
+        server_name ${DOMAIN:-localhost};
+
+        ssl_certificate /etc/nginx/certs/selfsigned.crt;
+        ssl_certificate_key /etc/nginx/certs/selfsigned.key;
+
+        location / {
+            proxy_pass http://dendrite:8008;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        }
+    }
+}
+EOF
+    log "Nginx 配置生成完成: $NGINX_FILE"
+}
+
+# -------------------------------
+# 启动 Docker 容器
+# -------------------------------
+start_containers() {
+    log "启动容器..."
+    docker-compose -f "$BASE_DIR/docker-compose.yml" down || true
+    docker-compose -f "$BASE_DIR/docker-compose.yml" up -d
+}
+
+# -------------------------------
+# 主程序
+# -------------------------------
 echo "======================================"
-echo "部署完成！"
-echo "HTTP/HTTPS 地址: $DOMAIN"
-echo "管理员账号: $ADMIN_USER"
-echo "管理员密码: $ADMIN_PASS"
-echo "数据库密码: $DB_PASS"
+echo "    Matrix Dendrite 部署脚本"
 echo "======================================"
+echo "1. 安装 Dendrite"
+echo "2. 重新安装 Dendrite"
+echo "0. 退出"
+echo "======================================"
+
+read -p "请选择操作 [0-2]: " choice
+
+case "$choice" in
+    1|2)
+        read -p "请输入域名或 VPS IP (回车使用 localhost): " DOMAIN
+        read -p "请输入 PostgreSQL 用户名 (回车使用 dendrite): " DB_USER
+        DB_USER=${DB_USER:-dendrite}
+        read -p "请输入 PostgreSQL 密码 (回车随机生成): " DB_PASSWORD
+        DB_PASSWORD=${DB_PASSWORD:-$(openssl rand -base64 12)}
+        install_dependencies
+        prepare_directories
+        generate_private_key
+        generate_self_signed_cert
+        generate_dendrite_config
+        generate_docker_compose
+        generate_nginx_config
+        start_containers
+        log "部署完成！"
+        echo "HTTP/HTTPS 地址: ${DOMAIN:-localhost}"
+        echo "管理员数据库密码: $DB_PASSWORD"
+        ;;
+    0)
+        log "退出"
+        exit 0
+        ;;
+    *)
+        err "无效选项"
+        exit 1
+        ;;
+esac
