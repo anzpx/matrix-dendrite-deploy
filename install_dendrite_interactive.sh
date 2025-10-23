@@ -17,14 +17,32 @@ echo "======================================"
 # 自动获取 VPS IP
 VPS_IP=$(curl -s ifconfig.me)
 
+# 随机生成函数
+random_string() {
+  head /dev/urandom | tr -dc A-Za-z0-9 | head -c12
+}
+
 # 交互式输入
 read -p "请输入域名或 VPS IP (直接回车自动使用 VPS IP: $VPS_IP): " DOMAIN
 DOMAIN=${DOMAIN:-$VPS_IP}
 
-read -p "请输入 PostgreSQL 数据库密码: " DB_PASS
-read -p "请输入管理员账号用户名: " ADMIN_USER
-read -s -p "请输入管理员账号密码: " ADMIN_PASS
+read -p "请输入 PostgreSQL 数据库密码 (回车随机生成): " DB_PASS
+DB_PASS=${DB_PASS:-$(random_string)}
+
+read -p "请输入管理员账号用户名 (回车随机生成): " ADMIN_USER
+ADMIN_USER=${ADMIN_USER:-user_$(random_string)}
+
+read -s -p "请输入管理员账号密码 (回车随机生成): " ADMIN_PASS
 echo
+ADMIN_PASS=${ADMIN_PASS:-$(random_string)}
+
+echo
+echo "使用配置如下:"
+echo "域名/IP: $DOMAIN"
+echo "数据库密码: $DB_PASS"
+echo "管理员账号: $ADMIN_USER"
+echo "管理员密码: $ADMIN_PASS"
+echo "======================================"
 
 # 系统检查
 if ! grep -q "Ubuntu" /etc/os-release; then
@@ -150,7 +168,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U dendrite -d dendrite"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   dendrite:
     image: matrixdotorg/dendrite-monolith:latest
@@ -173,16 +191,16 @@ cd /opt/dendrite
 docker-compose down >/dev/null 2>&1 || true
 docker-compose up -d
 
-# 等待 Dendrite 启动
-echo "等待服务启动..."
+# 等待 PostgreSQL 健康
+echo "等待 PostgreSQL 健康..."
 for i in {1..30}; do
-    STATUS=$(docker-compose ps dendrite | grep dendrite | awk '{print $4}')
-    if [[ "$STATUS" == "Up" ]]; then
-        echo "✅ Dendrite 服务已启动"
+    HEALTH=$(docker inspect --format='{{.State.Health.Status}}' dendrite_postgres_1 2>/dev/null || echo "starting")
+    if [[ "$HEALTH" == "healthy" ]]; then
+        echo "✅ PostgreSQL 已就绪"
         break
     fi
-    echo "等待服务启动... ($i/30)"
-    sleep 10
+    echo "等待 PostgreSQL 健康... ($i/30)"
+    sleep 5
 done
 
 # 创建管理员账号
@@ -195,22 +213,8 @@ echo "⚠️ 管理员账号创建失败，可能已存在或服务未就绪"
 # 配置 Nginx
 echo "[7/7] 配置 Nginx"
 NGINX_CONF="/etc/nginx/sites-available/dendrite.conf"
-if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
-    cat > $NGINX_CONF <<NGX
-server {
-    listen 80;
-    server_name $DOMAIN;
 
-    location / {
-        proxy_pass http://127.0.0.1:8008;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-NGX
-else
+apply_selfsigned_cert() {
     SSL_KEY="$CERT_DIR/selfsigned.key"
     SSL_CRT="$CERT_DIR/selfsigned.crt"
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
@@ -240,21 +244,43 @@ server {
     }
 }
 NGX
+    echo "⚠️ 已使用自签名证书"
+}
+
+if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
+    cat > $NGINX_CONF <<NGX
+server {
+    listen 80;
+    server_name $DOMAIN;
+
+    location / {
+        proxy_pass http://127.0.0.1:8008;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+NGX
+
+    if ! certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m admin@"$DOMAIN"; then
+        echo "⚠️ Let’s Encrypt 证书申请失败，改用自签名证书"
+        apply_selfsigned_cert
+    fi
+else
+    apply_selfsigned_cert
 fi
 
 ln -sf $NGINX_CONF /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl restart nginx
 
-if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
-    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m admin@"$DOMAIN" || \
-    echo "⚠️ Certbot 证书申请失败，请检查域名解析"
-fi
-
 echo "======================================"
 echo "✅ 部署完成"
 echo "访问地址: https://$DOMAIN"
 echo "管理员账号: $ADMIN_USER"
+echo "管理员密码: $ADMIN_PASS"
+echo "数据库密码: $DB_PASS"
 echo "日志路径: $LOG_DIR"
 echo "======================================"
 echo "检查服务状态: cd /opt/dendrite && docker-compose ps"
