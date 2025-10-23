@@ -1,8 +1,8 @@
 #!/bin/bash
 # ======================================
-# Matrix Dendrite 自动部署脚本
-# 支持安装 / 重新安装
-# 使用 vectorim/dendrite 镜像
+# Matrix Dendrite 自动部署脚本（最终优化版）
+# 兼容 Ubuntu 22.04+
+# 使用 vectorim/dendrite 镜像（官方推荐）
 # ======================================
 
 BASE_DIR="/opt/dendrite"
@@ -62,7 +62,7 @@ read -rp "请输入 PostgreSQL 密码 (回车随机生成): " PGPASS
 PGPASS=${PGPASS:-$(random_pass)}
 
 read -rp "请输入管理员用户名 (回车随机生成): " ADMINUSER
-ADMINUSER=${ADMINUSER:-user_$(openssl rand -hex 4)}
+ADMINUSER=${ADMINUSER:-admin_$(openssl rand -hex 3)}
 
 read -rp "请输入管理员密码 (回车随机生成): " ADMINPASS
 ADMINPASS=${ADMINPASS:-$(random_pass)}
@@ -80,17 +80,28 @@ echo "[INFO] 安装依赖..."
 apt update
 apt install -y docker.io docker-compose curl openssl nginx certbot python3-certbot-nginx dnsutils
 
-# 生成 Dendrite 私钥
+# 检查 Docker 服务
+systemctl enable docker
+systemctl restart docker
+
+# 生成私钥
 if [[ ! -f "$KEY_FILE" ]]; then
-    echo "[INFO] PEM 私钥缺失，生成私钥..."
+    echo "[INFO] 生成 Dendrite 私钥..."
     ssh-keygen -t ed25519 -f "$KEY_FILE" -N ""
 else
     echo "[INFO] PEM 私钥已存在: $KEY_FILE"
 fi
 
+# 检查私钥合法性
+if ! grep -q "PRIVATE KEY" "$KEY_FILE"; then
+    echo "[WARN] 私钥文件损坏，重新生成..."
+    rm -f "$KEY_FILE"
+    ssh-keygen -t ed25519 -f "$KEY_FILE" -N ""
+fi
+
 # 生成自签名证书
 if [[ ! -f "$SELF_SIGNED_CERT" || ! -f "$SELF_SIGNED_KEY" ]]; then
-    echo "[INFO] 生成自签名证书..."
+    echo "[INFO] 生成自签名 SSL 证书..."
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
         -keyout "$SELF_SIGNED_KEY" -out "$SELF_SIGNED_CERT" \
         -subj "/CN=$DOMAIN"
@@ -102,18 +113,16 @@ fi
 echo "[INFO] 生成 Dendrite 配置..."
 cat > "$DENDRITE_CONFIG" <<EOF
 server_name: "$DOMAIN"
-private_key_file: "$KEY_FILE"
+private_key: "/etc/dendrite/matrix_key.pem"
 database:
-  type: "postgres"
-  user: "$PGUSER"
-  password: "$PGPASS"
-  host: "postgres"
-  name: "dendrite"
-media_store: "/media_store"
+  type: postgres
+  connection_string: "postgres://$PGUSER:$PGPASS@postgres/dendrite?sslmode=disable"
+media:
+  base_path: /media_store
 EOF
 
-# 生成 Docker Compose 文件
-echo "[INFO] 生成 Docker Compose 文件..."
+# 生成 Docker Compose
+echo "[INFO] 生成 docker-compose.yml..."
 cat > "$DOCKER_COMPOSE_FILE" <<EOF
 version: '3.7'
 
@@ -149,7 +158,7 @@ EOF
 
 # 生成 Nginx 配置
 echo "[INFO] 生成 Nginx 配置..."
-cat > "$BASE_DIR/nginx.conf" <<EOF
+cat > /etc/nginx/sites-available/dendrite.conf <<EOF
 server {
     listen 443 ssl;
     server_name $DOMAIN;
@@ -172,18 +181,23 @@ server {
 }
 EOF
 
+ln -sf /etc/nginx/sites-available/dendrite.conf /etc/nginx/sites-enabled/dendrite.conf
+nginx -t && systemctl restart nginx
+
 # 启动容器
-echo "[INFO] 启动 Dendrite..."
+echo "[INFO] 启动 Dendrite 容器..."
 docker-compose -f "$DOCKER_COMPOSE_FILE" up -d
 
-# 启动 Nginx
-echo "[INFO] 启动 Nginx..."
-nginx -c "$BASE_DIR/nginx.conf"
+# 健康检查
+echo "[INFO] 检查 Dendrite 启动状态..."
+sleep 8
+docker ps | grep dendrite && echo "[OK] Dendrite 启动成功" || echo "[ERROR] 容器启动异常，请检查 docker logs dendrite_dendrite"
 
 echo "======================================"
-echo "部署完成!"
-echo "HTTP/HTTPS 地址: $DOMAIN"
+echo "✅ Dendrite 部署完成！"
+echo "访问地址: https://$DOMAIN"
 echo "管理员账号: $ADMINUSER"
 echo "管理员密码: $ADMINPASS"
-echo "PostgreSQL 密码: $PGPASS"
+echo "数据库密码: $PGPASS"
+echo "配置路径: $BASE_DIR"
 echo "======================================"
