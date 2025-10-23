@@ -6,7 +6,7 @@ mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_DIR/install.log") 2>&1
 
 echo "======================================"
-echo "Matrix Dendrite 自动证书部署（交互式）"
+echo "Matrix Dendrite 完整一键部署脚本"
 echo "======================================"
 
 # 交互输入参数
@@ -23,10 +23,13 @@ if ! grep -q "Ubuntu" /etc/os-release; then
 fi
 
 # 安装依赖
-echo "[1/6] 安装 Docker / Docker Compose / Nginx / Certbot"
+echo "[1/7] 安装 Docker / Docker Compose / Nginx / Certbot"
 apt update -y
 apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx openssl
 systemctl enable --now docker
+
+# 创建目录
+mkdir -p /opt/dendrite/{config,data/postgres,certs}
 
 # 检测域名解析
 VPS_IP=$(curl -s ifconfig.me)
@@ -41,8 +44,19 @@ else
     DOMAIN="$VPS_IP"
 fi
 
-# 创建目录
-mkdir -p /opt/dendrite/{config,data/postgres,certs}
+# 设置权限
+sudo chown -R $(whoami):$(whoami) /opt/dendrite/config
+sudo chmod -R 755 /opt/dendrite/config
+
+# 生成 Dendrite 密钥
+docker run --rm -v /opt/dendrite/config:/mnt matrixdotorg/dendrite-monolith:latest \
+    /usr/bin/generate-keys -private-key /mnt/matrix_key.pem
+
+# 生成 dendrite.yaml 配置文件
+docker run --rm -v /opt/dendrite/config:/mnt matrixdotorg/dendrite-monolith:latest \
+    /usr/bin/generate-config -dir /mnt \
+    -db "postgres://dendrite:$DB_PASS@postgres:5432/dendrite?sslmode=disable" \
+    -server "$DOMAIN"
 
 # Docker Compose 文件
 cat > /opt/dendrite/docker-compose.yml <<EOF
@@ -75,16 +89,14 @@ services:
     restart: unless-stopped
 EOF
 
-# 生成密钥和配置
-docker run --rm -v /opt/dendrite/config:/mnt matrixdotorg/dendrite-monolith:latest     /usr/bin/generate-keys -private-key /mnt/matrix_key.pem
-
-docker run --rm -v /opt/dendrite/config:/mnt matrixdotorg/dendrite-monolith:latest     /usr/bin/generate-config -dir /var/dendrite/     -db postgres://dendrite:$DB_PASS@postgres/dendrite?sslmode=disable     -server $DOMAIN > /opt/dendrite/config/dendrite.yaml
-
-# 启动 Docker
-docker-compose -f /opt/dendrite/docker-compose.yml up -d
+# 启动 Docker Compose
+cd /opt/dendrite
+docker-compose up -d
 
 # 创建管理员账号
-docker exec -it dendrite-monolith   /usr/bin/create-account -config /etc/dendrite/dendrite.yaml   -username $ADMIN_USER -password $ADMIN_PASS --admin || echo "管理员账号可能已存在"
+docker exec -it dendrite-monolith \
+  /usr/bin/create-account -config /etc/dendrite/dendrite.yaml \
+  -username $ADMIN_USER -password $ADMIN_PASS --admin || echo "管理员账号可能已存在"
 
 # 配置 Nginx + 证书
 NGINX_CONF="/etc/nginx/sites-available/dendrite.conf"
@@ -114,7 +126,9 @@ else
     echo "[7/7] 配置 Nginx + 自签名证书"
     SSL_KEY="/opt/dendrite/certs/selfsigned.key"
     SSL_CRT="/opt/dendrite/certs/selfsigned.crt"
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048         -keyout $SSL_KEY -out $SSL_CRT         -subj "/CN=$DOMAIN"
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout $SSL_KEY -out $SSL_CRT \
+        -subj "/CN=$DOMAIN"
     cat > $NGINX_CONF <<NGX
 server {
     listen 443 ssl;
