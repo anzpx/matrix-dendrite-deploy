@@ -49,10 +49,9 @@ fi
 chown -R $(whoami):$(whoami) "/opt/dendrite"
 chmod -R 755 "$CONFIG_DIR"
 
-# 首先生成密钥而不使用配置文件
+# 使用 OpenSSL 生成密钥而不是 Dendrite 工具
 echo "[2/7] 生成 Dendrite 密钥"
-docker run --rm -v "$CONFIG_DIR:/mnt" matrixdotorg/dendrite-monolith:latest \
-    /usr/bin/generate-keys -private-key /mnt/matrix_key.pem
+openssl genrsa -out "$CONFIG_DIR/matrix_key.pem" 2048
 
 # 创建完整的配置文件
 echo "[3/7] 创建完整配置文件"
@@ -177,17 +176,26 @@ docker-compose up -d
 
 # 等待服务启动
 echo "等待服务启动..."
-sleep 30
+for i in {1..30}; do
+    if docker-compose ps | grep -q "Up"; then
+        echo "服务已启动"
+        break
+    fi
+    echo "等待服务启动... ($i/30)"
+    sleep 10
+done
 
 # 创建管理员账号
 echo "[6/7] 创建管理员账号"
-docker-compose exec -T dendrite \
+if docker-compose exec -T dendrite \
     /usr/bin/create-account --config /etc/dendrite/dendrite.yaml \
-    --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin || {
-    echo "管理员账号创建失败，可能已存在或服务未就绪"
+    --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin 2>/dev/null; then
+    echo "✅ 管理员账号创建成功"
+else
+    echo "⚠️ 管理员账号创建失败，可能已存在或服务未就绪"
     echo "稍后可以手动运行以下命令创建："
     echo "cd /opt/dendrite && docker-compose exec dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml --username $ADMIN_USER --password '$ADMIN_PASS' --admin"
-}
+fi
 
 # 配置 Nginx
 echo "[7/7] 配置 Nginx"
@@ -301,5 +309,6 @@ echo "管理员账号: $ADMIN_USER"
 echo "日志路径: $LOG_DIR"
 echo "======================================"
 echo "检查服务状态: cd /opt/dendrite && docker-compose ps"
-echo "查看日志: cd /opt/dendrite && docker-compose logs dendrite"
+echo "查看 Dendrite 日志: cd /opt/dendrite && docker-compose logs dendrite"
+echo "查看 PostgreSQL 日志: cd /opt/dendrite && docker-compose logs postgres"
 echo "重启服务: cd /opt/dendrite && docker-compose restart"
