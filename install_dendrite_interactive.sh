@@ -49,9 +49,9 @@ fi
 chown -R $(whoami):$(whoami) "/opt/dendrite"
 chmod -R 755 "$CONFIG_DIR"
 
-# 使用 OpenSSL 生成密钥而不是 Dendrite 工具
+# 使用 OpenSSL 生成 PKCS#8 密钥
 echo "[2/7] 生成 Dendrite 密钥"
-openssl genrsa -out "$CONFIG_DIR/matrix_key.pem" 2048
+openssl genpkey -algorithm RSA -out "$CONFIG_DIR/matrix_key.pem" -pkeyopt rsa_keygen_bits:2048
 
 # 创建完整的配置文件
 echo "[3/7] 创建完整配置文件"
@@ -127,7 +127,7 @@ EOF
 mkdir -p "$DATA_DIR/media_store"
 chmod 755 "$DATA_DIR/media_store"
 
-# 创建 Docker Compose 文件
+# 创建 Docker Compose 文件（去掉 command，使用默认启动）
 echo "[4/7] 创建 Docker Compose 配置"
 cat > /opt/dendrite/docker-compose.yml <<EOF
 version: '3.7'
@@ -159,12 +159,6 @@ services:
       - ./config:/etc/dendrite
       - ./data/media_store:/etc/dendrite/media_store
       - ./logs:/var/log
-    command:
-      - "/usr/bin/dendrite-monolith"
-      - "--config"
-      - "/etc/dendrite/dendrite.yaml"
-      - "--http-bind-address"
-      - "0.0.0.0:8008"
     restart: unless-stopped
 EOF
 
@@ -177,8 +171,9 @@ docker-compose up -d
 # 等待服务启动
 echo "等待服务启动..."
 for i in {1..30}; do
-    if docker-compose ps | grep -q "Up"; then
-        echo "服务已启动"
+    STATUS=$(docker-compose ps dendrite | grep dendrite | awk '{print $4}')
+    if [[ "$STATUS" == "Up" ]]; then
+        echo "✅ Dendrite 服务已启动"
         break
     fi
     echo "等待服务启动... ($i/30)"
@@ -187,28 +182,19 @@ done
 
 # 创建管理员账号
 echo "[6/7] 创建管理员账号"
-if docker-compose exec -T dendrite \
+docker-compose exec -T dendrite \
     /usr/bin/create-account --config /etc/dendrite/dendrite.yaml \
-    --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin 2>/dev/null; then
-    echo "✅ 管理员账号创建成功"
-else
-    echo "⚠️ 管理员账号创建失败，可能已存在或服务未就绪"
-    echo "稍后可以手动运行以下命令创建："
-    echo "cd /opt/dendrite && docker-compose exec dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml --username $ADMIN_USER --password '$ADMIN_PASS' --admin"
-fi
+    --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin || \
+echo "⚠️ 管理员账号创建失败，可能已存在或服务未就绪"
 
 # 配置 Nginx
 echo "[7/7] 配置 Nginx"
 NGINX_CONF="/etc/nginx/sites-available/dendrite.conf"
 if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
-    echo "配置 Nginx + Let's Encrypt"
     cat > $NGINX_CONF <<NGX
 server {
     listen 80;
     server_name $DOMAIN;
-    
-    access_log $LOG_DIR/nginx_access.log;
-    error_log $LOG_DIR/nginx_error.log;
 
     location / {
         proxy_pass http://127.0.0.1:8008;
@@ -216,31 +202,16 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-    
-    location ~ ^/(_matrix|_synapse) {
-        proxy_pass http://127.0.0.1:8008;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
     }
 }
 NGX
 else
-    echo "配置 Nginx + 自签名证书"
     SSL_KEY="$CERT_DIR/selfsigned.key"
     SSL_CRT="$CERT_DIR/selfsigned.crt"
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
         -keyout "$SSL_KEY" -out "$SSL_CRT" \
         -subj "/CN=$DOMAIN" 2>/dev/null
-        
+
     cat > $NGINX_CONF <<NGX
 server {
     listen 80;
@@ -255,56 +226,29 @@ server {
     ssl_certificate $SSL_CRT;
     ssl_certificate_key $SSL_KEY;
 
-    access_log $LOG_DIR/nginx_access.log;
-    error_log $LOG_DIR/nginx_error.log;
-
     location / {
         proxy_pass http://127.0.0.1:8008;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-    
-    location ~ ^/(_matrix|_synapse) {
-        proxy_pass http://127.0.0.1:8008;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
     }
 }
 NGX
 fi
 
-# 启用 Nginx 配置
 ln -sf $NGINX_CONF /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
-
-# 测试并重启 Nginx
 nginx -t && systemctl restart nginx
 
-# 如果是域名且解析正确，申请 SSL 证书
 if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
-    echo "申请 Let's Encrypt SSL 证书..."
     certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m admin@"$DOMAIN" || \
-    echo "Certbot 证书申请失败，请检查域名解析"
+    echo "⚠️ Certbot 证书申请失败，请检查域名解析"
 fi
 
 echo "======================================"
 echo "✅ 部署完成"
-if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
-    echo "访问地址: https://$DOMAIN"
-else
-    echo "HTTP 地址: http://$DOMAIN:8008"
-    echo "HTTPS 地址（自签名证书）: https://$DOMAIN"
-fi
+echo "访问地址: https://$DOMAIN"
 echo "管理员账号: $ADMIN_USER"
 echo "日志路径: $LOG_DIR"
 echo "======================================"
