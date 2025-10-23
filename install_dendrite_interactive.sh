@@ -14,8 +14,13 @@ echo "======================================"
 echo "Matrix Dendrite 一键部署脚本"
 echo "======================================"
 
+# 自动获取 VPS IP
+VPS_IP=$(curl -s ifconfig.me)
+
 # 交互式输入
-read -p "请输入域名或 VPS IP: " DOMAIN
+read -p "请输入域名或 VPS IP (直接回车自动使用 VPS IP: $VPS_IP): " DOMAIN
+DOMAIN=${DOMAIN:-$VPS_IP}
+
 read -p "请输入 PostgreSQL 数据库密码: " DB_PASS
 read -p "请输入管理员账号用户名: " ADMIN_USER
 read -s -p "请输入管理员账号密码: " ADMIN_PASS
@@ -34,7 +39,6 @@ apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx open
 systemctl enable --now docker
 
 # 检测域名解析
-VPS_IP=$(curl -s ifconfig.me)
 DNS_IP=$(dig +short "$DOMAIN" | head -n1)
 USE_LETSENCRYPT="no"
 if [[ "$DNS_IP" == "$VPS_IP" ]]; then
@@ -49,11 +53,12 @@ fi
 chown -R $(whoami):$(whoami) "/opt/dendrite"
 chmod -R 755 "$CONFIG_DIR"
 
-# 使用 OpenSSL 生成 PKCS#8 密钥
-echo "[2/7] 生成 Dendrite 密钥"
-openssl genpkey -algorithm RSA -out "$CONFIG_DIR/matrix_key.pem" -pkeyopt rsa_keygen_bits:2048
+# 使用 OpenSSL 生成 Ed25519 密钥
+echo "[2/7] 生成 Dendrite 私钥 (Ed25519)"
+openssl genpkey -algorithm ED25519 -out "$CONFIG_DIR/matrix_key.pem"
+chmod 600 "$CONFIG_DIR/matrix_key.pem"
 
-# 创建完整的配置文件
+# 创建完整配置文件
 echo "[3/7] 创建完整配置文件"
 cat > "$CONFIG_DIR/dendrite.yaml" <<EOF
 global:
@@ -127,7 +132,7 @@ EOF
 mkdir -p "$DATA_DIR/media_store"
 chmod 755 "$DATA_DIR/media_store"
 
-# 创建 Docker Compose 文件（去掉 command，使用默认启动）
+# 创建 Docker Compose 文件
 echo "[4/7] 创建 Docker Compose 配置"
 cat > /opt/dendrite/docker-compose.yml <<EOF
 version: '3.7'
@@ -162,13 +167,13 @@ services:
     restart: unless-stopped
 EOF
 
-# 启动 Docker Compose
+# 启动服务
 echo "[5/7] 启动服务"
 cd /opt/dendrite
 docker-compose down >/dev/null 2>&1 || true
 docker-compose up -d
 
-# 等待服务启动
+# 等待 Dendrite 启动
 echo "等待服务启动..."
 for i in {1..30}; do
     STATUS=$(docker-compose ps dendrite | grep dendrite | awk '{print $4}')
