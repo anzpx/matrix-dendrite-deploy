@@ -2,11 +2,10 @@
 set -e
 
 # 日志和目录
-BASE_DIR="/opt/dendrite"
-LOG_DIR="$BASE_DIR/logs"
-CONFIG_DIR="$BASE_DIR/config"
-DATA_DIR="$BASE_DIR/data"
-CERT_DIR="$BASE_DIR/certs"
+LOG_DIR="/opt/dendrite/logs"
+CONFIG_DIR="/opt/dendrite/config"
+DATA_DIR="/opt/dendrite/data"
+CERT_DIR="/opt/dendrite/certs"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -29,7 +28,7 @@ show_menu() {
 # 检查服务状态
 check_service_status() {
     echo -e "${YELLOW}检查服务状态...${NC}"
-    cd "$BASE_DIR" || exit
+    cd /opt/dendrite
     echo -e "${BLUE}容器状态:${NC}"
     docker-compose ps
     echo -e "${BLUE}PostgreSQL 日志 (最后20行):${NC}"
@@ -50,14 +49,14 @@ wait_for_postgres() {
     echo "PostgreSQL 已就绪"
 }
 
-# 等待 Dendrite 容器健康
+# 等待 Dendrite 就绪
 wait_for_dendrite() {
     echo "[*] 等待 Dendrite 容器就绪..."
-    until [ "$(docker inspect -f '{{.State.Health.Status}}' dendrite_dendrite_1 2>/dev/null)" == "healthy" ]; do
+    until docker-compose exec -T dendrite /usr/bin/dendrite-monolith --version >/dev/null 2>&1; do
         echo "Dendrite 容器未就绪，等待 5 秒..."
         sleep 5
     done
-    echo "Dendrite 容器已就绪"
+    echo "Dendrite 已就绪"
 }
 
 # 安装函数
@@ -110,12 +109,12 @@ install_dendrite() {
         DOMAIN="$VPS_IP"
     fi
 
-    chown -R $(whoami):$(whoami) "$BASE_DIR"
+    chown -R $(whoami):$(whoami) "/opt/dendrite"
     chmod -R 755 "$CONFIG_DIR"
 
     echo "[2/7] 生成私钥"
     openssl genpkey -algorithm ED25519 -out "$CONFIG_DIR/matrix_key.pem"
-    chmod 600 "$CONFIG_DIR/matrix_key.pem"
+    chmod 644 "$CONFIG_DIR/matrix_key.pem"  # ✅ 容器可读权限
 
     echo "[3/7] 创建 Dendrite 配置文件"
     cat > "$CONFIG_DIR/dendrite.yaml" <<EOF
@@ -168,7 +167,7 @@ logging:
 EOF
 
     echo "[4/7] 创建 Docker Compose 文件"
-    cat > "$BASE_DIR/docker-compose.yml" <<EOF
+    cat > /opt/dendrite/docker-compose.yml <<EOF
 version: '3.7'
 services:
   postgres:
@@ -194,20 +193,15 @@ services:
       - "8008:8008"
       - "8448:8448"
     volumes:
-      - ./config:/etc/dendrite
+      - ./config:/etc/dendrite:ro  # ✅ 只读挂载，容器可读
       - ./data/media_store:/etc/dendrite/media_store
       - ./logs:/var/log
     command: /usr/bin/dendrite-monolith --config /etc/dendrite/dendrite.yaml
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pgrep dendrite-monolith || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
 EOF
 
     echo "[5/7] 启动服务"
-    cd "$BASE_DIR"
+    cd /opt/dendrite
     docker-compose down -v || true
     docker-compose up -d
 
@@ -221,7 +215,7 @@ EOF
 
     echo "[7/7] 配置 Nginx"
     NGINX_CONF="/etc/nginx/sites-available/dendrite.conf"
-    cat > "$NGINX_CONF" <<NGX
+    cat > $NGINX_CONF <<NGX
 server {
     listen 80;
     server_name $DOMAIN;
@@ -234,7 +228,7 @@ server {
     }
 }
 NGX
-    ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/
+    ln -sf $NGINX_CONF /etc/nginx/sites-enabled/
     rm -f /etc/nginx/sites-enabled/default
     nginx -t && systemctl reload nginx
 
@@ -262,16 +256,16 @@ reinstall_dendrite() {
         return
     fi
 
-    if [ -d "$BASE_DIR" ]; then
-        BACKUP_DIR="$BASE_DIR_backup_$(date +%Y%m%d_%H%M%S)"
+    if [ -d "/opt/dendrite" ]; then
+        BACKUP_DIR="/opt/dendrite_backup_$(date +%Y%m%d_%H%M%S)"
         mkdir -p "$BACKUP_DIR"
         echo "备份现有配置到: $BACKUP_DIR"
-        cp -r "$CONFIG_DIR"/* "$BACKUP_DIR/" 2>/dev/null || true
-        cd "$BASE_DIR"
+        cp -r /opt/dendrite/config/* "$BACKUP_DIR/" 2>/dev/null || true
+        cd /opt/dendrite
         docker-compose down -v || true
     fi
 
-    rm -rf "$BASE_DIR"
+    rm -rf /opt/dendrite
     install_dendrite
 }
 
