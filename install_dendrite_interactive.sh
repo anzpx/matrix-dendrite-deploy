@@ -25,6 +25,29 @@ show_menu() {
     echo -e "${BLUE}======================================${NC}"
 }
 
+# 检查服务状态函数
+check_service_status() {
+    echo -e "${YELLOW}检查服务状态...${NC}"
+    
+    cd /opt/dendrite
+    
+    # 检查容器状态
+    echo -e "${BLUE}容器状态:${NC}"
+    docker-compose ps
+    
+    # 检查 PostgreSQL 日志
+    echo -e "${BLUE}PostgreSQL 日志 (最后20行):${NC}"
+    docker-compose logs postgres --tail=20
+    
+    # 检查 Dendrite 日志
+    echo -e "${BLUE}Dendrite 日志 (最后30行):${NC}"
+    docker-compose logs dendrite --tail=30
+    
+    # 检查端口监听
+    echo -e "${BLUE}端口监听状态:${NC}"
+    netstat -tlnp | grep -E ':(8008|8448|5432)' || echo "相关端口未监听"
+}
+
 # 安装函数
 install_dendrite() {
     echo -e "${GREEN}[开始安装 Dendrite]${NC}"
@@ -70,13 +93,13 @@ install_dendrite() {
     # 安装依赖
     echo "[1/7] 安装 Docker / Docker Compose / Nginx / Certbot / dnsutils"
     apt update -y
-    apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx openssl dnsutils
+    apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx openssl dnsutils curl
     systemctl enable --now docker
 
     # 检测域名解析
     DNS_IP=$(dig +short "$DOMAIN" | head -n1)
     USE_LETSENCRYPT="no"
-    if [[ "$DNS_IP" == "$VPS_IP" ]]; then
+    if [[ "$DNS_IP" == "$VPS_IP" ]] && [[ "$DOMAIN" != "$VPS_IP" ]]; then
         echo "✅ 域名解析正确，启用 Let's Encrypt"
         USE_LETSENCRYPT="yes"
     else
@@ -93,65 +116,46 @@ install_dendrite() {
     openssl genpkey -algorithm ED25519 -out "$CONFIG_DIR/matrix_key.pem"
     chmod 644 "$CONFIG_DIR/matrix_key.pem"
 
-    # 创建 Dendrite 配置文件
+    # 创建 Dendrite 配置文件（简化版本）
     echo "[3/7] 创建完整配置文件"
     cat > "$CONFIG_DIR/dendrite.yaml" <<EOF
 global:
   server_name: $DOMAIN
   private_key: /etc/dendrite/matrix_key.pem
-  well_known_server_name: https://$DOMAIN
-  presence:
-    enable_inbound: true
-    enable_outbound: true
 
 database:
   connection_string: postgres://dendrite:$DB_PASS@postgres:5432/dendrite?sslmode=disable
 
-app_service_api:
-  internal_api:
-    connect: http://dendrite:7777
-    listen: http://0.0.0.0:7777
-
 client_api:
   internal_api:
-    connect: http://dendrite:7771
+    connect: http://localhost:7771
     listen: http://0.0.0.0:7771
   external_api:
     listen: http://0.0.0.0:8008
 
 federation_api:
   internal_api:
-    connect: http://dendrite:7772
+    connect: http://localhost:7772
     listen: http://0.0.0.0:7772
   external_api:
     listen: http://0.0.0.0:8448
 
-key_server:
-  internal_api:
-    connect: http://dendrite:7774
-    listen: http://0.0.0.0:7774
-
 media_api:
   internal_api:
-    connect: http://dendrite:7775
+    connect: http://localhost:7775
     listen: http://0.0.0.0:7775
   external_api:
     listen: http://0.0.0.0:8075
   base_path: /etc/dendrite/media_store
 
-room_server:
-  internal_api:
-    connect: http://dendrite:7773
-    listen: http://0.0.0.0:7773
-
 sync_api:
   internal_api:
-    connect: http://dendrite:7773
+    connect: http://localhost:7773
     listen: http://0.0.0.0:7773
 
 user_api:
   internal_api:
-    connect: http://dendrite:7781
+    connect: http://localhost:7781
     listen: http://0.0.0.0:7781
   account_database:
     connection_string: postgres://dendrite:$DB_PASS@postgres:5432/dendrite?sslmode=disable
@@ -179,9 +183,9 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dendrite -d dendrite"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   dendrite:
     image: matrixdotorg/dendrite-monolith:latest
@@ -200,12 +204,6 @@ services:
       - "--config"
       - "/etc/dendrite/dendrite.yaml"
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8008/_matrix/client/versions"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
 EOF
 
     # 启动服务
@@ -214,42 +212,56 @@ EOF
     docker-compose down -v || true
     docker-compose up -d
 
-    # 等待服务完全启动
-    echo "等待服务启动..."
-    sleep 30
+    # 等待服务启动（缩短等待时间）
+    echo "等待服务启动（15秒）..."
+    sleep 15
 
-    # 等待 Dendrite 容器健康
-    echo "等待 Dendrite 容器健康..."
-    for i in {1..60}; do
-        if docker-compose exec -T dendrite curl -f http://localhost:8008/_matrix/client/versions > /dev/null 2>&1; then
-            echo "✅ Dendrite 服务已就绪"
-            break
+    # 快速检查服务状态
+    echo "快速检查服务状态..."
+    for i in {1..12}; do
+        echo "检查尝试 ($i/12)..."
+        
+        # 检查容器是否运行
+        if ! docker-compose ps | grep -q "Up"; then
+            echo "容器未运行，等待 5 秒..."
+            sleep 5
+            continue
         fi
-        echo "等待 Dendrite 服务就绪... ($i/60)"
-        sleep 5
-    done
-
-    # 创建管理员账号，最多重试20次
-    echo "[6/7] 创建管理员账号"
-    for i in {1..20}; do
+        
+        # 尝试直接创建账号（不依赖健康检查）
         if docker-compose exec -T dendrite \
             /usr/bin/create-account --config /etc/dendrite/dendrite.yaml \
             --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin 2>/dev/null; then
             echo "✅ 管理员账号创建成功"
             break
         else
-            echo "⚠️ 管理员账号创建失败，等待重试... ($i/20)"
-            sleep 10
+            echo "账号创建失败 ($i/12)，等待 5 秒后重试..."
+            sleep 5
         fi
-        if [ $i -eq 20 ]; then
-            echo "❌ 管理员账号创建失败，请手动执行以下命令："
-            echo "cd /opt/dendrite && docker-compose exec dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml --username \"$ADMIN_USER\" --password \"$ADMIN_PASS\" --admin"
+        
+        if [ $i -eq 6 ]; then
+            echo -e "${YELLOW}中间检查点 - 当前服务状态:${NC}"
+            docker-compose ps
+            docker-compose logs dendrite --tail=10
         fi
     done
 
-    # 配置 Nginx
+    # 最终检查
+    if docker-compose exec -T dendrite \
+        /usr/bin/create-account --config /etc/dendrite/dendrite.yaml \
+        --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin 2>/dev/null; then
+        echo "✅ 管理员账号创建成功"
+    else
+        echo -e "${YELLOW}⚠️ 管理员账号创建失败${NC}"
+        check_service_status
+        echo -e "${YELLOW}请稍后手动创建管理员账号:${NC}"
+        echo "cd /opt/dendrite && docker-compose exec dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml --username \"$ADMIN_USER\" --password \"$ADMIN_PASS\" --admin"
+    fi
+
+    # 配置 Nginx（简化版本）
     echo "[7/7] 配置 Nginx"
     NGINX_CONF="/etc/nginx/sites-available/dendrite.conf"
+    
     if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
         echo "配置 Nginx + Let's Encrypt"
         cat > $NGINX_CONF <<NGX
@@ -266,24 +278,11 @@ server {
 }
 NGX
     else
-        echo "配置 Nginx + 自签名证书"
-        SSL_KEY="$CERT_DIR/selfsigned.key"
-        SSL_CRT="$CERT_DIR/selfsigned.crt"
-        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-            -keyout "$SSL_KEY" -out "$SSL_CRT" \
-            -subj "/CN=$DOMAIN" 2>/dev/null
+        echo "配置 Nginx HTTP（无 SSL）"
         cat > $NGINX_CONF <<NGX
 server {
     listen 80;
     server_name $DOMAIN;
-    return 301 https://\$server_name\$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    server_name $DOMAIN;
-    ssl_certificate $SSL_CRT;
-    ssl_certificate_key $SSL_KEY;
     location / {
         proxy_pass http://127.0.0.1:8008;
         proxy_set_header Host \$host;
@@ -297,7 +296,7 @@ NGX
 
     ln -sf $NGINX_CONF /etc/nginx/sites-enabled/
     rm -f /etc/nginx/sites-enabled/default
-    nginx -t && systemctl restart nginx
+    nginx -t && systemctl reload nginx
 
     # 如果是域名且解析正确，申请 SSL
     if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
@@ -310,18 +309,15 @@ NGX
     if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
         echo "访问地址: https://$DOMAIN"
     else
-        echo "HTTP 地址: http://$DOMAIN:8008"
-        echo "HTTPS 地址（自签名证书）: https://$DOMAIN"
+        echo "HTTP 地址: http://$DOMAIN"
     fi
     echo "管理员账号: $ADMIN_USER"
     echo "管理员密码: $ADMIN_PASS"
     echo "数据库密码: $DB_PASS"
-    echo "日志路径: $LOG_DIR"
     echo "======================================"
-    echo "检查服务状态: cd /opt/dendrite && docker-compose ps"
-    echo "查看 Dendrite 日志: cd /opt/dendrite && docker-compose logs dendrite"
-    echo "查看 PostgreSQL 日志: cd /opt/dendrite && docker-compose logs postgres"
-    echo "重启服务: cd /opt/dendrite && docker-compose restart"
+    
+    # 最终状态检查
+    check_service_status
     
     echo -e "${GREEN}[安装完成]${NC}"
 }
