@@ -162,7 +162,7 @@ services:
     image: postgres:15
     environment:
       - POSTGRES_USER=dendrite
-      - POSTGRES_PASSWORD=$DB_PASS
+      - POSTGRES_PASSWORD=${DB_PASS}
       - POSTGRES_DB=dendrite
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
@@ -182,11 +182,12 @@ services:
       - "8008:8008"
       - "8448:8448"
     volumes:
-      - ./config:/etc/dendrite
+      - ./config:/etc/dendrite     # 配置和密钥挂载
       - ./data/media_store:/etc/dendrite/media_store
-      - ./logs:/var/log
+      - ./logs:/var/log/dendrite
     command: /usr/bin/dendrite-monolith --config /etc/dendrite/dendrite.yaml
     restart: unless-stopped
+
 EOF
 
     # 启动服务
