@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-# 日志和目录
 LOG_DIR="/opt/dendrite/logs"
 CONFIG_DIR="/opt/dendrite/config"
 DATA_DIR="/opt/dendrite/data"
@@ -14,7 +13,6 @@ echo "======================================"
 echo "Matrix Dendrite 一键部署脚本"
 echo "======================================"
 
-# 自动获取 VPS IP
 VPS_IP=$(curl -s ifconfig.me)
 
 # 随机生成函数
@@ -22,8 +20,8 @@ random_string() {
   head /dev/urandom | tr -dc A-Za-z0-9 | head -c12
 }
 
-# 交互式输入
-read -p "请输入域名或 VPS IP (直接回车自动使用 VPS IP: $VPS_IP): " DOMAIN
+# 输入交互
+read -p "请输入域名或 VPS IP (回车自动使用 VPS IP: $VPS_IP): " DOMAIN
 DOMAIN=${DOMAIN:-$VPS_IP}
 
 read -p "请输入 PostgreSQL 数据库密码 (回车随机生成): " DB_PASS
@@ -71,12 +69,12 @@ fi
 chown -R $(whoami):$(whoami) "/opt/dendrite"
 chmod -R 755 "$CONFIG_DIR"
 
-# 使用 OpenSSL 生成 Ed25519 密钥
-echo "[2/7] 生成 Dendrite 私钥 (Ed25519)"
-openssl genpkey -algorithm ED25519 -out "$CONFIG_DIR/matrix_key.pem"
-chmod 600 "$CONFIG_DIR/matrix_key.pem"
+# 生成 RSA 私钥
+echo "[2/7] 生成 Dendrite 私钥 (RSA 2048)"
+openssl genrsa -out "$CONFIG_DIR/matrix_key.pem" 2048
+chmod 644 "$CONFIG_DIR/matrix_key.pem"
 
-# 创建完整配置文件
+# 创建配置文件
 echo "[3/7] 创建完整配置文件"
 cat > "$CONFIG_DIR/dendrite.yaml" <<EOF
 global:
@@ -146,11 +144,10 @@ logging:
     path: /var/log/dendrite.log
 EOF
 
-# 创建媒体存储目录
 mkdir -p "$DATA_DIR/media_store"
 chmod 755 "$DATA_DIR/media_store"
 
-# 创建 Docker Compose 文件
+# Docker Compose 文件
 echo "[4/7] 创建 Docker Compose 配置"
 cat > /opt/dendrite/docker-compose.yml <<EOF
 version: '3.7'
@@ -191,28 +188,41 @@ cd /opt/dendrite
 docker-compose down >/dev/null 2>&1 || true
 docker-compose up -d
 
-# 等待 PostgreSQL 健康
-echo "等待 PostgreSQL 健康..."
-for i in {1..30}; do
-    HEALTH=$(docker inspect --format='{{.State.Health.Status}}' dendrite_postgres_1 2>/dev/null || echo "starting")
-    if [[ "$HEALTH" == "healthy" ]]; then
-        echo "✅ PostgreSQL 已就绪"
+# 等待 Dendrite 容器健康
+echo "等待 Dendrite 容器健康..."
+MAX_WAIT=60
+WAIT_COUNT=0
+while true; do
+    STATUS=$(docker inspect --format='{{.State.Status}}' dendrite_dendrite_1 2>/dev/null || echo "notfound")
+    if [[ "$STATUS" == "running" ]]; then
+        echo "✅ Dendrite 容器已启动"
         break
     fi
-    echo "等待 PostgreSQL 健康... ($i/30)"
+    WAIT_COUNT=$((WAIT_COUNT+1))
+    if [[ $WAIT_COUNT -ge $MAX_WAIT ]]; then
+        echo "⚠️ Dendrite 容器启动超时，请检查日志："
+        docker-compose logs dendrite --tail=50
+        exit 1
+    fi
+    echo "等待 Dendrite 启动中... ($WAIT_COUNT/$MAX_WAIT)"
     sleep 5
 done
 
-# 创建管理员账号
+# 自动重试创建管理员账号
 echo "[6/7] 创建管理员账号"
-docker-compose exec -T dendrite \
-    /usr/bin/create-account --config /etc/dendrite/dendrite.yaml \
-    --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin || \
-echo "⚠️ 管理员账号创建失败，可能已存在或服务未就绪"
+for i in {1..10}; do
+    if docker-compose exec -T dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml --username "$ADMIN_USER" --password "$ADMIN_PASS" --admin; then
+        echo "✅ 管理员账号创建成功"
+        break
+    else
+        echo "等待 Dendrite 服务就绪...($i/10)"
+        sleep 5
+    fi
+done
 
 # 配置 Nginx
 echo "[7/7] 配置 Nginx"
-NGINX_CONF="/etc/nginx/sites-available/dendrite.conf"
+NGINX_CONF="/etc/nginx/sites-available/dendrite"
 
 apply_selfsigned_cert() {
     SSL_KEY="$CERT_DIR/selfsigned.key"
@@ -277,7 +287,12 @@ nginx -t && systemctl restart nginx
 
 echo "======================================"
 echo "✅ 部署完成"
-echo "访问地址: https://$DOMAIN"
+if [[ "$USE_LETSENCRYPT" == "yes" ]]; then
+    echo "访问地址: https://$DOMAIN"
+else
+    echo "HTTP 地址: http://$DOMAIN:8008"
+    echo "HTTPS 地址（自签名证书）: https://$DOMAIN"
+fi
 echo "管理员账号: $ADMIN_USER"
 echo "管理员密码: $ADMIN_PASS"
 echo "数据库密码: $DB_PASS"
