@@ -10,7 +10,7 @@
 ## 快速部署
 
 ```bash
-sudo bash <(curl -s https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/install_dendrite_interactive.sh)
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/install_dendrite_interactive.sh)"
 ```
 
 执行后会依次提示输入：
