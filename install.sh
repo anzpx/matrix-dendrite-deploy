@@ -57,17 +57,44 @@ if fuser "$LOCK_FILE" >/dev/null 2>&1; then
 fi
 
 # ===============================
-# 3. 安装依赖
+# 3. 安装官方 Docker
 # ===============================
-echo "[INFO] 更新 apt 并安装依赖..."
-apt update -y
-apt install -y docker.io docker-compose openssl curl jq
+echo "[INFO] 检测并安装 Docker 官方版本..."
+if command -v docker >/dev/null 2>&1; then
+  echo "[INFO] 已检测到 Docker，卸载旧版本及冲突..."
+  sudo apt remove -y docker docker-engine docker.io containerd runc docker-compose-plugin || true
+  sudo apt autoremove -y
+fi
+
+echo "[INFO] 安装依赖包..."
+sudo apt update
+sudo apt install -y ca-certificates curl gnupg lsb-release software-properties-common
+
+echo "[INFO] 添加 Docker 官方仓库..."
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# 验证 Docker
+docker --version
+docker compose version
+
+# ===============================
+# 4. 安装其他依赖
+# ===============================
+echo "[INFO] 安装其他依赖..."
+sudo apt install -y openssl curl jq certbot python3-certbot-nginx nano
 
 mkdir -p "$BASE_DIR"
 cd "$BASE_DIR"
 
 # ===============================
-# 4. 生成 docker-compose.yml
+# 5. 生成 docker-compose.yml
 # ===============================
 cat > docker-compose.yml <<EOF
 services:
@@ -109,7 +136,7 @@ networks:
 EOF
 
 # ===============================
-# 5. 启动 Postgres 并检测状态
+# 6. 启动 Postgres 并检测状态
 # ===============================
 echo "[INFO] 启动 Postgres 并检测数据库是否可用..."
 docker compose up -d postgres
@@ -123,24 +150,23 @@ for i in {1..12}; do
     echo "[WAIT] Postgres 未就绪，等待中 ($((i*5))s)..."
   fi
   if [ "$i" -eq 12 ]; then
-    echo "[ERR] Postgres 启动超时，尝试修复..."
-    docker compose restart postgres
+    echo "[WARN] Postgres 启动超时，尝试重启..."
+    docker compose restart dendrite_postgres
     sleep 10
   fi
 done
 
-# 检查并创建数据库
+# 创建数据库
 if ! docker exec dendrite_postgres psql -U dendrite -lqt | cut -d \| -f 1 | grep -qw dendrite; then
   echo "[FIX] 数据库 dendrite 不存在，正在创建..."
   docker exec dendrite_postgres psql -U dendrite -c "CREATE DATABASE dendrite;"
 fi
 
 # ===============================
-# 6. 生成 dendrite.yaml 配置文件
+# 7. 生成 dendrite.yaml
 # ===============================
 mkdir -p "$BASE_DIR/config"
 cat > "$BASE_DIR/config/dendrite.yaml" <<EOF
-version: 2
 global:
   server_name: "$SERVER_NAME"
   private_key: "/etc/dendrite/matrix_key.pem"
@@ -148,10 +174,14 @@ global:
     connection_string: "postgres://dendrite:$DB_PASS@postgres/dendrite?sslmode=disable"
   media_api:
     base_path: "/var/dendrite/media"
+
+logging:
+  level: info
+  hooks: []
 EOF
 
 # ===============================
-# 7. 启动 Dendrite
+# 8. 启动 Dendrite
 # ===============================
 echo "[INFO] 启动 Dendrite..."
 docker compose up -d dendrite
@@ -164,20 +194,19 @@ if ! docker ps | grep -q dendrite; then
 fi
 
 # ===============================
-# 8. 自动创建管理员账户
+# 9. 创建管理员账户
 # ===============================
 echo "[INFO] 创建管理员账户..."
 docker exec dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml -u "$ADMIN_USER" -p "$ADMIN_PASS" --admin --server-name "$SERVER_NAME" || true
 
 # ===============================
-# 9. HTTPS 自动申请证书
+# 10. HTTPS 自动申请证书
 # ===============================
 echo "[INFO] 配置 HTTPS（Let's Encrypt）..."
-apt install -y certbot python3-certbot-nginx
 certbot certonly --standalone -d "$SERVER_NAME" --non-interactive --agree-tos -m admin@$SERVER_NAME || echo "[WARN] 自动签发证书失败，请稍后手动执行 certbot。"
 
 # ===============================
-# 10. 完成信息
+# 11. 完成信息
 # ===============================
 echo
 echo "🎉 Dendrite 已成功部署！"
