@@ -1,3 +1,4 @@
+sudo tee /opt/install-dendrite-fixed.sh > /dev/null <<'EOF'
 #!/bin/bash
 set -e
 
@@ -215,3 +216,7 @@ if curl -s http://localhost:8008/_matrix/client/versions > /dev/null; then
 else
     echo "⚠️  服务测试失败，但安装已完成。请稍后重试。"
 fi
+EOF
+
+# 设置脚本权限
+sudo chmod +x /opt/install-dendrite-fixed.sh
