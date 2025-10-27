@@ -23,77 +23,37 @@ fi
 
 # 创建安装目录
 echo "创建安装目录..."
-sudo mkdir -p /opt/dendrite-official
-cd /opt/dendrite-official
+sudo mkdir -p /opt/dendrite-fixed
+cd /opt/dendrite-fixed
 sudo mkdir -p config
 
 # 获取服务器IP
 SERVER_IP=$(curl -s ifconfig.me)
 echo "检测到服务器IP: $SERVER_IP"
 
-# 创建官方的 Docker Compose 文件
-echo "创建 Docker Compose 配置..."
-sudo tee docker-compose.yml > /dev/null <<'DOCKEREOF'
-version: "3.4"
+# 先创建基础的配置文件
+echo "创建基础配置文件..."
+sudo tee config/dendrite.yaml > /dev/null <<CONFIGEOF
+global:
+  server_name: $SERVER_IP
+  private_key: /etc/dendrite/matrix_key.pem
 
-services:
-  postgres:
-    hostname: postgres
-    image: postgres:15-alpine
-    restart: always
-    volumes:
-      - dendrite_postgres_data:/var/lib/postgresql/data
-    environment:
-      POSTGRES_PASSWORD: dendrite_password
-      POSTGRES_USER: dendrite
-      POSTGRES_DATABASE: dendrite
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dendrite"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - internal
+database:
+  connection_string: postgres://dendrite:dendrite_password@postgres:5432/dendrite?sslmode=disable
+CONFIGEOF
 
-  monolith:
-    hostname: monolith
-    image: matrixdotorg/dendrite-monolith:latest
-    ports:
-      - 8008:8008
-      - 8448:8448
-    volumes:
-      - ./config:/etc/dendrite
-      - dendrite_media:/var/dendrite/media
-      - dendrite_jetstream:/var/dendrite/jetstream
-      - dendrite_search_index:/var/dendrite/searchindex
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - internal
-    restart: unless-stopped
+# 使用传统方法生成 RSA 私钥（避免兼容性问题）
+echo "生成私钥..."
+sudo openssl genrsa -traditional -out config/matrix_key.pem 2048
+sudo chmod 644 config/matrix_key.pem
 
-networks:
-  internal:
-    attachable: true
+# 验证私钥格式
+echo "验证私钥格式..."
+sudo head -1 config/matrix_key.pem
+sudo openssl rsa -in config/matrix_key.pem -check -noout
 
-volumes:
-  dendrite_postgres_data:
-  dendrite_media:
-  dendrite_jetstream:
-  dendrite_search_index:
-DOCKEREOF
-
-# 使用 Dendrite 官方方法生成配置和密钥
-echo "生成 Dendrite 配置和密钥..."
-sudo docker run --rm \
-  -v /opt/dendrite-official/config:/etc/dendrite \
-  matrixdotorg/dendrite-monolith:latest \
-  /usr/bin/generate-keys \
-  -private-key /etc/dendrite/matrix_key.pem
-
-# 创建配置文件
-echo "创建配置文件..."
+# 创建完整的配置文件
+echo "创建完整配置文件..."
 sudo tee config/dendrite.yaml > /dev/null <<CONFIGEOF
 global:
   server_name: $SERVER_IP
@@ -150,6 +110,59 @@ logging:
     path: /var/log/dendrite.log
 CONFIGEOF
 
+# 创建官方的 Docker Compose 文件
+echo "创建 Docker Compose 配置..."
+sudo tee docker-compose.yml > /dev/null <<'DOCKEREOF'
+version: "3.4"
+
+services:
+  postgres:
+    hostname: postgres
+    image: postgres:15-alpine
+    restart: always
+    volumes:
+      - dendrite_postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: dendrite_password
+      POSTGRES_USER: dendrite
+      POSTGRES_DATABASE: dendrite
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dendrite"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  monolith:
+    hostname: monolith
+    image: matrixdotorg/dendrite-monolith:latest
+    ports:
+      - 8008:8008
+      - 8448:8448
+    volumes:
+      - ./config:/etc/dendrite
+      - dendrite_media:/var/dendrite/media
+      - dendrite_jetstream:/var/dendrite/jetstream
+      - dendrite_search_index:/var/dendrite/searchindex
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    restart: unless-stopped
+
+networks:
+  internal:
+    attachable: true
+
+volumes:
+  dendrite_postgres_data:
+  dendrite_media:
+  dendrite_jetstream:
+  dendrite_search_index:
+DOCKEREOF
+
 # 启动服务
 echo "启动 Dendrite 服务..."
 sudo docker-compose up -d
@@ -189,10 +202,10 @@ echo "管理员密码: admin123"
 echo "数据库密码: dendrite_password"
 echo ""
 echo "管理命令:"
-echo "查看状态: cd /opt/dendrite-official && sudo docker-compose ps"
-echo "查看日志: cd /opt/dendrite-official && sudo docker-compose logs -f monolith"
-echo "重启服务: cd /opt/dendrite-official && sudo docker-compose restart"
-echo "停止服务: cd /opt/dendrite-official && sudo docker-compose down"
+echo "查看状态: cd /opt/dendrite-fixed && sudo docker-compose ps"
+echo "查看日志: cd /opt/dendrite-fixed && sudo docker-compose logs -f monolith"
+echo "重启服务: cd /opt/dendrite-fixed && sudo docker-compose restart"
+echo "停止服务: cd /opt/dendrite-fixed && sudo docker-compose down"
 echo "======================================"
 
 # 测试服务
