@@ -1,8 +1,9 @@
 #!/bin/bash
 set -e
+set -o pipefail
 
 echo "======================================"
-echo " Matrix Dendrite 一键部署脚本 (升级版)001"
+echo " Matrix Dendrite 一键部署脚本 (升级版)"
 echo " 适配 Ubuntu 22.04 + Docker"
 echo "======================================"
 
@@ -46,7 +47,6 @@ echo
 # ===============================
 # 2. 修复 apt 锁定问题
 # ===============================
-echo "[INFO] 检查 apt 是否被锁定..."
 LOCK_FILE="/var/lib/dpkg/lock-frontend"
 if fuser "$LOCK_FILE" >/dev/null 2>&1; then
   echo "[WARN] apt 被锁定，检测到 unattended-upgrade 正在运行，正在强制结束..."
@@ -96,7 +96,7 @@ cd "$BASE_DIR"
 # ===============================
 # 5. 生成 docker-compose.yml
 # ===============================
-cat > docker-compose.yml <<EOF
+cat > "$BASE_DIR/docker-compose.yml" <<EOF
 services:
   postgres:
     image: $POSTGRES_IMG
@@ -139,7 +139,7 @@ EOF
 # 6. 启动 Postgres 并检测状态
 # ===============================
 echo "[INFO] 启动 Postgres 并检测数据库是否可用..."
-docker compose up -d postgres
+docker compose -f "$BASE_DIR/docker-compose.yml" up -d postgres
 
 for i in {1..12}; do
   sleep 5
@@ -151,7 +151,7 @@ for i in {1..12}; do
   fi
   if [ "$i" -eq 12 ]; then
     echo "[WARN] Postgres 启动超时，尝试重启..."
-    docker compose restart dendrite_postgres
+    docker compose -f "$BASE_DIR/docker-compose.yml" restart dendrite_postgres
     sleep 10
   fi
 done
@@ -184,14 +184,16 @@ EOF
 # 8. 启动 Dendrite
 # ===============================
 echo "[INFO] 启动 Dendrite..."
-docker compose up -d dendrite
-sleep 10
+docker compose -f "$BASE_DIR/docker-compose.yml" up -d dendrite
 
-if ! docker ps | grep -q dendrite; then
-  echo "[ERR] Dendrite 启动失败，日志如下："
-  docker logs dendrite
-  exit 1
-fi
+# 等待 Dendrite 完全启动
+for i in {1..12}; do
+  sleep 5
+  if docker logs dendrite 2>&1 | grep -q "Listening on"; then
+    echo "[INFO] Dendrite 已完全启动。"
+    break
+  fi
+done
 
 # ===============================
 # 9. 创建管理员账户
