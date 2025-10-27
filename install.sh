@@ -3,7 +3,7 @@ set -e
 set -o pipefail
 
 echo "======================================"
-echo " Matrix Dendrite 一键部署脚本 (升级版)"
+echo " Matrix Dendrite 一键部署脚本 (升级版)002"
 echo " 适配 Ubuntu 22.04 + Docker"
 echo "======================================"
 
@@ -94,7 +94,20 @@ mkdir -p "$BASE_DIR"
 cd "$BASE_DIR"
 
 # ===============================
-# 5. 生成 docker-compose.yml
+# 5. 自动清理旧容器（保留配置和 media_store）
+# ===============================
+echo "[INFO] 检测并清理旧容器..."
+OLD_CONTAINERS=("dendrite_postgres" "dendrite")
+for c in "${OLD_CONTAINERS[@]}"; do
+  if docker ps -a --format '{{.Names}}' | grep -q "^$c\$"; then
+    echo "[WARN] 停止并删除旧容器 $c ..."
+    docker stop "$c" >/dev/null 2>&1 || true
+    docker rm "$c" >/dev/null 2>&1 || true
+  fi
+done
+
+# ===============================
+# 6. 生成 docker-compose.yml
 # ===============================
 cat > "$BASE_DIR/docker-compose.yml" <<EOF
 services:
@@ -136,7 +149,7 @@ networks:
 EOF
 
 # ===============================
-# 6. 启动 Postgres 并检测状态
+# 7. 启动 Postgres 并检测状态
 # ===============================
 echo "[INFO] 启动 Postgres 并检测数据库是否可用..."
 docker compose -f "$BASE_DIR/docker-compose.yml" up -d postgres
@@ -163,7 +176,7 @@ if ! docker exec dendrite_postgres psql -U dendrite -lqt | cut -d \| -f 1 | grep
 fi
 
 # ===============================
-# 7. 生成 dendrite.yaml（修复 logging.hooks 问题）
+# 8. 生成 dendrite.yaml（修复 logging.hooks 问题）
 # ===============================
 mkdir -p "$BASE_DIR/config"
 cat > "$BASE_DIR/config/dendrite.yaml" <<EOF
@@ -181,7 +194,7 @@ logging:
 EOF
 
 # ===============================
-# 8. 启动 Dendrite
+# 9. 启动 Dendrite
 # ===============================
 echo "[INFO] 启动 Dendrite..."
 docker compose -f "$BASE_DIR/docker-compose.yml" up -d dendrite
@@ -196,13 +209,13 @@ for i in {1..12}; do
 done
 
 # ===============================
-# 9. 创建管理员账户
+# 10. 创建管理员账户
 # ===============================
 echo "[INFO] 创建管理员账户..."
 docker exec dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml -u "$ADMIN_USER" -p "$ADMIN_PASS" --admin --server-name "$SERVER_NAME" || true
 
 # ===============================
-# 10. HTTPS 自动处理
+# 11. HTTPS 自动处理
 # ===============================
 if [[ "$SERVER_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "[INFO] 服务器为 IP，生成自签名证书..."
@@ -216,7 +229,7 @@ else
 fi
 
 # ===============================
-# 11. 完成信息
+# 12. 完成信息
 # ===============================
 echo
 echo "🎉 Dendrite 已成功部署！"
