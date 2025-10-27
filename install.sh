@@ -61,7 +61,7 @@ fi
 # ===============================
 echo "[INFO] 更新 apt 并安装依赖..."
 apt update -y
-apt install -y docker.io docker-compose openssl curl jq
+apt install -y docker.io docker-compose openssl curl jq certbot python3-certbot-nginx nano
 
 mkdir -p "$BASE_DIR"
 cd "$BASE_DIR"
@@ -124,7 +124,7 @@ for i in {1..12}; do
   fi
   if [ "$i" -eq 12 ]; then
     echo "[ERR] Postgres 启动超时，尝试修复..."
-    docker compose restart postgres
+    docker compose restart dendrite_postgres
     sleep 10
   fi
 done
@@ -136,11 +136,10 @@ if ! docker exec dendrite_postgres psql -U dendrite -lqt | cut -d \| -f 1 | grep
 fi
 
 # ===============================
-# 6. 生成 dendrite.yaml 配置文件
+# 6. 生成 dendrite.yaml（修复 logging.hooks 错误）
 # ===============================
 mkdir -p "$BASE_DIR/config"
 cat > "$BASE_DIR/config/dendrite.yaml" <<EOF
-version: 2
 global:
   server_name: "$SERVER_NAME"
   private_key: "/etc/dendrite/matrix_key.pem"
@@ -148,6 +147,10 @@ global:
     connection_string: "postgres://dendrite:$DB_PASS@postgres/dendrite?sslmode=disable"
   media_api:
     base_path: "/var/dendrite/media"
+
+logging:
+  level: info
+  hooks: []
 EOF
 
 # ===============================
@@ -173,7 +176,6 @@ docker exec dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yam
 # 9. HTTPS 自动申请证书
 # ===============================
 echo "[INFO] 配置 HTTPS（Let's Encrypt）..."
-apt install -y certbot python3-certbot-nginx
 certbot certonly --standalone -d "$SERVER_NAME" --non-interactive --agree-tos -m admin@$SERVER_NAME || echo "[WARN] 自动签发证书失败，请稍后手动执行 certbot。"
 
 # ===============================
