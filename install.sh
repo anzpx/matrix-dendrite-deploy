@@ -2,7 +2,7 @@
 set -e
 
 echo "======================================"
-echo " Matrix Dendrite 一键部署脚本 (升级版)"
+echo " Matrix Dendrite 一键部署脚本 (升级版)001"
 echo " 适配 Ubuntu 22.04 + Docker"
 echo "======================================"
 
