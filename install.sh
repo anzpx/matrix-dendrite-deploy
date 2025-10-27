@@ -44,7 +44,7 @@ echo "  DB_PASS = $DB_PASS"
 echo
 
 # ===============================
-# 2. 自动修复 apt 锁定问题
+# 2. 修复 apt 锁定问题
 # ===============================
 echo "[INFO] 检查 apt 是否被锁定..."
 LOCK_FILE="/var/lib/dpkg/lock-frontend"
@@ -163,7 +163,7 @@ if ! docker exec dendrite_postgres psql -U dendrite -lqt | cut -d \| -f 1 | grep
 fi
 
 # ===============================
-# 7. 生成 dendrite.yaml
+# 7. 生成 dendrite.yaml（修复 logging.hooks 问题）
 # ===============================
 mkdir -p "$BASE_DIR/config"
 cat > "$BASE_DIR/config/dendrite.yaml" <<EOF
@@ -200,10 +200,18 @@ echo "[INFO] 创建管理员账户..."
 docker exec dendrite /usr/bin/create-account --config /etc/dendrite/dendrite.yaml -u "$ADMIN_USER" -p "$ADMIN_PASS" --admin --server-name "$SERVER_NAME" || true
 
 # ===============================
-# 10. HTTPS 自动申请证书
+# 10. HTTPS 自动处理
 # ===============================
-echo "[INFO] 配置 HTTPS（Let's Encrypt）..."
-certbot certonly --standalone -d "$SERVER_NAME" --non-interactive --agree-tos -m admin@$SERVER_NAME || echo "[WARN] 自动签发证书失败，请稍后手动执行 certbot。"
+if [[ "$SERVER_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "[INFO] 服务器为 IP，生成自签名证书..."
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout "$BASE_DIR/config/server.key" \
+    -out "$BASE_DIR/config/server.crt" \
+    -subj "/CN=$SERVER_NAME"
+else
+  echo "[INFO] 配置 HTTPS（Let's Encrypt）..."
+  certbot certonly --standalone -d "$SERVER_NAME" --non-interactive --agree-tos -m admin@$SERVER_NAME || echo "[WARN] 自动签发证书失败"
+fi
 
 # ===============================
 # 11. 完成信息
