@@ -1,39 +1,31 @@
 #!/bin/bash
 set -e
 
-echo "======================================"
-echo "   Dendrite Matrix 服务器一键安装脚本"
-echo "======================================"
-
-# 检查 Docker 是否安装
-if ! command -v docker &> /dev/null; then
-    echo "安装 Docker..."
-    curl -fsSL https://get.docker.com -o get-docker.sh
-    sudo sh get-docker.sh
-    sudo usermod -aG docker $USER
-    rm get-docker.sh
-fi
-
-# 检查 Docker Compose 是否安装
-if ! command -v docker-compose &> /dev/null; then
-    echo "安装 Docker Compose..."
-    sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose
-fi
-
-# 创建安装目录
-echo "创建安装目录..."
-sudo mkdir -p /opt/dendrite-simple
+# 完全清理
 cd /opt/dendrite-simple
+sudo docker-compose down
+cd /opt
+sudo rm -rf dendrite-simple
+
+# 重新创建目录
+sudo mkdir -p /opt/dendrite-fixed
+cd /opt/dendrite-fixed
 sudo mkdir -p config data/media_store logs
 
 # 获取服务器IP
 SERVER_IP=$(curl -s ifconfig.me)
-echo "检测到服务器IP: $SERVER_IP"
+
+# 使用传统格式生成 RSA 私钥
+sudo openssl genrsa -traditional -out config/matrix_key.pem 2048
+sudo chmod 644 config/matrix_key.pem
+
+# 验证私钥格式
+echo "验证私钥格式:"
+sudo head -1 config/matrix_key.pem
+sudo openssl rsa -in config/matrix_key.pem -check -noout
 
 # 创建 Docker Compose 文件
-echo "创建 Docker Compose 配置..."
-sudo tee docker-compose.yml > /dev/null <<'DOCKEREOF'
+sudo tee docker-compose.yml > /dev/null <<'EOF'
 version: '3.7'
 services:
   postgres:
@@ -52,7 +44,7 @@ services:
       retries: 10
 
   dendrite:
-    image: matrixdotorg/dendrite-monolith:latest
+    image: matrixdotorg/dendrite-monolith:v0.13.4
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,17 +55,28 @@ services:
       - ./config:/etc/dendrite
       - ./data/media_store:/etc/dendrite/media_store
       - ./logs:/var/log
+    command: >
+      sh -c "
+        # 等待配置文件就绪
+        while [ ! -f /etc/dendrite/dendrite.yaml ]; do
+          echo '等待配置文件...'
+          sleep 2
+        done
+        
+        # 检查私钥文件
+        echo '检查私钥文件...'
+        ls -la /etc/dendrite/matrix_key.pem
+        head -1 /etc/dendrite/matrix_key.pem
+        
+        # 启动 Dendrite
+        echo '启动 Dendrite...'
+        /usr/bin/dendrite-monolith --config /etc/dendrite/dendrite.yaml
+      "
     restart: unless-stopped
-DOCKEREOF
-
-# 生成私钥
-echo "生成私钥..."
-sudo openssl genrsa -out config/matrix_key.pem 2048
-sudo chmod 644 config/matrix_key.pem
+EOF
 
 # 创建配置文件
-echo "创建配置文件..."
-sudo tee config/dendrite.yaml > /dev/null <<CONFIGEOF
+sudo tee config/dendrite.yaml > /dev/null <<EOF
 global:
   server_name: $SERVER_IP
   private_key: /etc/dendrite/matrix_key.pem
@@ -121,56 +124,34 @@ logging:
   level: info
   params:
     path: /var/log/dendrite.log
-CONFIGEOF
+EOF
 
 # 启动服务
-echo "启动 Dendrite 服务..."
 sudo docker-compose up -d
 
-echo "等待服务启动（30秒）..."
-for i in {1..30}; do
-    echo -n "."
-    sleep 1
-done
-echo ""
+echo "等待服务启动..."
+sleep 30
 
-# 检查服务状态
-echo "检查服务状态..."
-if sudo docker-compose ps | grep -q "Up"; then
-    echo "✅ 服务启动成功"
+# 检查状态和日志
+sudo docker-compose ps
+sudo docker-compose logs --tail=20 dendrite
+
+# 如果服务正常运行，创建管理员账户
+if sudo docker-compose ps | grep dendrite | grep -q "Up"; then
+    echo "创建管理员账户..."
+    sudo docker-compose exec dendrite /usr/bin/create-account \
+        --config /etc/dendrite/dendrite.yaml \
+        --username admin \
+        --password admin123 \
+        --admin
+    
+    echo "======================================"
+    echo "      Dendrite 安装完成！"
+    echo "======================================"
+    echo "访问地址: http://$SERVER_IP:8008"
+    echo "管理员账号: admin" 
+    echo "管理员密码: admin123"
 else
-    echo "❌ 服务启动失败，请检查日志"
+    echo "❌ Dendrite 服务启动失败，请检查日志"
     sudo docker-compose logs dendrite
-    exit 1
-fi
-
-# 创建管理员账户
-echo "创建管理员账户..."
-sudo docker-compose exec dendrite /usr/bin/create-account \
-    --config /etc/dendrite/dendrite.yaml \
-    --username admin \
-    --password admin123 \
-    --admin
-
-echo ""
-echo "======================================"
-echo "       安装完成！"
-echo "======================================"
-echo "访问地址: http://$SERVER_IP:8008"
-echo "管理员账号: admin"
-echo "管理员密码: admin123"
-echo ""
-echo "管理命令:"
-echo "查看状态: cd /opt/dendrite-simple && sudo docker-compose ps"
-echo "查看日志: cd /opt/dendrite-simple && sudo docker-compose logs -f dendrite"
-echo "重启服务: cd /opt/dendrite-simple && sudo docker-compose restart"
-echo "停止服务: cd /opt/dendrite-simple && sudo docker-compose down"
-echo "======================================"
-
-# 测试服务
-echo "测试服务连通性..."
-if curl -s http://localhost:8008/_matrix/client/versions > /dev/null; then
-    echo "✅ 服务测试成功"
-else
-    echo "⚠️  服务测试失败，但安装已完成。请稍后重试。"
 fi
