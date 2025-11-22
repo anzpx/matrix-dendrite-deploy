@@ -68,13 +68,26 @@ fi
 docker system prune -af || true
 
 # ------------------------------
-# Step 4: 生成密钥文件
+# Step 4: 生成正确的密钥文件
 # ------------------------------
-if [ ! -f matrix_key.pem ]; then
-    echo "===== Step 4: 生成 matrix_key.pem ====="
-    openssl genpkey -out matrix_key.pem -outform PEM -algorithm RSA -pkeyopt rsa_keygen_bits:2048
+echo "===== Step 4: 生成正确的 matrix_key.pem ====="
+# 删除旧的密钥文件（如果有）
+rm -f matrix_key.pem
+
+# 生成正确的 RSA 私钥
+openssl genrsa -out matrix_key.pem 2048
+chmod 600 matrix_key.pem
+
+# 验证密钥文件
+if ! openssl rsa -in matrix_key.pem -check -noout >/dev/null 2>&1; then
+    echo "❌ 生成的密钥文件无效，尝试备用方法..."
+    # 备用方法：生成包含完整 PKCS#1 格式的密钥
+    openssl genrsa -traditional -out matrix_key.pem 2048
     chmod 600 matrix_key.pem
 fi
+
+echo "✅ 密钥文件生成完成"
+openssl rsa -in matrix_key.pem -check -noout
 
 # ------------------------------
 # Step 5: 生成 dendrite.yaml (版本2配置)
@@ -231,16 +244,24 @@ sleep 10
 docker ps -a
 
 # 检查 dendrite 容器状态
-MAX_RETRIES=10
+MAX_RETRIES=15
 RETRY_COUNT=0
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     DENDRITE_STATUS=$(docker inspect -f '{{.State.Status}}' dendrite 2>/dev/null || echo "not_found")
     if [ "$DENDRITE_STATUS" = "running" ]; then
         echo "✅ dendrite 容器运行正常"
-        break
+        
+        # 检查容器是否真的健康（不仅仅是 running 状态）
+        sleep 5
+        if docker logs dendrite 2>&1 | tail -10 | grep -q "fatal\|error"; then
+            echo "⚠️ 容器运行中但有错误，检查日志..."
+            docker logs dendrite | tail -20
+        else
+            echo "✅ dendrite 容器健康运行"
+            break
+        fi
     elif [ "$DENDRITE_STATUS" = "not_found" ]; then
         echo "❌ dendrite 容器不存在"
-        docker logs dendrite || echo "无法读取日志"
         exit 1
     else
         echo "⏳ dendrite 容器状态: $DENDRITE_STATUS, 等待中... ($((RETRY_COUNT+1))/$MAX_RETRIES)"
@@ -252,16 +273,33 @@ done
 if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
     echo "❌ dendrite 容器启动超时，输出日志："
     docker logs dendrite
+    echo "=========================================="
+    echo "尝试手动调试："
+    echo "1. 检查密钥文件: openssl rsa -in matrix_key.pem -check -noout"
+    echo "2. 检查配置语法"
+    echo "3. 手动启动: docker compose up"
+    echo "=========================================="
     exit 1
 fi
 
 # 检查服务是否正常响应
 echo "检查服务响应..."
-if curl -f http://localhost:8008/_matrix/client/versions >/dev/null 2>&1; then
-    echo "✅ Matrix 服务响应正常"
-else
-    echo "⚠️ Matrix 服务未正常响应，检查日志..."
-    docker logs dendrite
+MAX_CHECK_RETRIES=5
+CHECK_COUNT=0
+while [ $CHECK_COUNT -lt $MAX_CHECK_RETRIES ]; do
+    if curl -f -m 10 http://localhost:8008/_matrix/client/versions >/dev/null 2>&1; then
+        echo "✅ Matrix 服务响应正常"
+        break
+    else
+        echo "⏳ 等待服务响应... ($((CHECK_COUNT+1))/$MAX_CHECK_RETRIES)"
+        sleep 10
+        CHECK_COUNT=$((CHECK_COUNT+1))
+    fi
+done
+
+if [ $CHECK_COUNT -eq $MAX_CHECK_RETRIES ]; then
+    echo "⚠️ Matrix 服务响应检查失败，但容器在运行中"
+    echo "查看详细日志: docker logs dendrite"
 fi
 
 echo "=========================================="
@@ -274,4 +312,5 @@ echo "下一步："
 echo "1. 配置防火墙开放端口 8008 和 8448"
 echo "2. 可以使用 Element 等客户端连接服务器"
 echo "3. 查看日志: docker logs -f dendrite"
+echo "4. 注册用户: curl -X POST http://localhost:8008/_matrix/client/r0/register -d '{\"username\":\"test\",\"password\":\"testpass\",\"auth\":{\"type\":\"m.login.dummy\"}}'"
 echo "=========================================="
