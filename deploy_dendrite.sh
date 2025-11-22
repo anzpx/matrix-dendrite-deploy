@@ -77,11 +77,11 @@ if [ ! -f matrix_key.pem ]; then
 fi
 
 # ------------------------------
-# Step 5: 生成 dendrite.yaml
+# Step 5: 生成 dendrite.yaml (版本2配置)
 # ------------------------------
-echo "===== Step 5: 创建 dendrite.yaml ====="
+echo "===== Step 5: 创建 dendrite.yaml (版本2) ====="
 cat > dendrite.yaml <<EOF
-version: 1
+version: 2
 global:
   server_name: "$IP"
   private_key: /etc/dendrite/matrix_key.pem
@@ -105,15 +105,9 @@ federation_api:
     max_retries: 16
     max_retries_for_server: 8
     disable_tls_validation: false
-  receive:
-    allow_private_ips: false
-    disable_tls_validation: false
   key_validity:
     cache_size: 1024
-    cache_lifetime: "1h"
-  muxed_http:
-    enabled: false
-    pattern: ""
+    cache_lifetime: 1h0m0s
 
 app_service_api: {}
 
@@ -121,18 +115,17 @@ key_server:
   prefer_direct_fetch: false
 
 media_api:
-  base_path: /var/dendrite/media_store
+  base_path: /var/dendrite/media-store
   max_file_size_bytes: 10485760
   dynamic_thumbnails: true
   max_thumbnail_generators: 10
   allow_remote: true
-  connection_string: "file:///var/dendrite/media_store"
 
 sync_api:
   realtime_enabled: true
   full_text_search:
     enabled: false
-    index_path: "/var/dendrite/searchindex"
+    index_path: /var/dendrite/searchindex
 
 user_api:
   account_database:
@@ -204,12 +197,10 @@ services:
     volumes:
       - ./dendrite.yaml:/etc/dendrite/dendrite.yaml:ro
       - ./matrix_key.pem:/etc/dendrite/matrix_key.pem:ro
-      - ./media_store:/var/dendrite/media_store:rw
+      - ./media_store:/var/dendrite/media-store:rw
     restart: unless-stopped
     command: [
-      "--config=/etc/dendrite/dendrite.yaml",
-      "--tls-cert=/etc/dendrite/server.crt",
-      "--tls-key=/etc/dendrite/server.key"
+      "--config=/etc/dendrite/dendrite.yaml"
     ]
 
 volumes:
