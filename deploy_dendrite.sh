@@ -5,20 +5,24 @@ echo "============================="
 echo "  一键部署 Matrix Dendrite "
 echo "============================="
 
-# 1. 自动获取 VPS 公网 IP（ens3 网卡）
+# 自动获取 VPS 公网 IP
 VPS_IP=$(ip -4 addr show ens3 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
 echo "检测到 VPS 公网 IP: $VPS_IP"
 
-# 2. 创建部署目录
+# 部署目录
 DEPLOY_DIR="/opt/dendrite-deploy"
-mkdir -p $DEPLOY_DIR
-cd $DEPLOY_DIR
+mkdir -p "$DEPLOY_DIR"
+cd "$DEPLOY_DIR"
 
-# 3. 随机生成 PostgreSQL 密码
+# 随机生成 PostgreSQL 密码
 POSTGRES_PASSWORD=$(openssl rand -base64 12)
 echo "生成 PostgreSQL 密码: $POSTGRES_PASSWORD"
 
-# 4. 创建 docker-compose.yml
+# 创建空目录和密钥文件占位
+mkdir -p media_store
+touch matrix_key.pem
+
+# 创建 docker-compose.yml
 cat > docker-compose.yml <<EOF
 version: "3.9"
 services:
@@ -46,14 +50,14 @@ services:
       - "8448:8448"
       - "8800:8800"
     volumes:
-      - ./dendrite.yaml:/dendrite.yaml
-      - ./matrix_key.pem:/matrix_key.pem
-      - ./media_store:/media_store
+      - $DEPLOY_DIR/dendrite.yaml:/dendrite.yaml:ro
+      - $DEPLOY_DIR/matrix_key.pem:/matrix_key.pem:ro
+      - $DEPLOY_DIR/media_store:/media_store
 volumes:
   postgres_data:
 EOF
 
-# 5. 创建最小可用 dendrite.yaml
+# 创建最小可用 dendrite.yaml
 cat > dendrite.yaml <<EOF
 server_name: "$VPS_IP"
 pid_file: "/var/run/dendrite.pid"
@@ -90,12 +94,8 @@ sync_api:
     connection_string: "postgres://postgres:$POSTGRES_PASSWORD@dendrite_postgres:5432/dendrite_sync?sslmode=disable"
 EOF
 
-# 6. 创建空目录和密钥文件占位
-mkdir -p media_store
-touch matrix_key.pem
-
-# 7. 启动 Dendrite 容器
+# 启动 Dendrite 容器
 docker compose up -d
 
-# 8. 查看日志，确认启动是否成功
+# 查看日志
 docker logs -f dendrite
