@@ -1,52 +1,42 @@
 #!/bin/bash
 set -e
 
-# ================================
-# Matrix Dendrite 一键部署脚本
-# 自动获取 VPS 公网 IP，生成 PostgreSQL 密码
-# 带错误检测和日志输出
-# ================================
+echo "===== Step 0: 获取 VPS 公网 IP ====="
+VPS_IP=$(curl -s https://ip.gs || curl -s https://api.ipify.org)
+echo "检测到 VPS 公网 IP: $VPS_IP"
 
-echo "===== Matrix Dendrite 部署开始 ====="
+echo "===== Step 1: 卸载旧 Docker 并清理残留 ====="
+sudo apt remove -y docker docker-engine docker.io containerd runc || true
+sudo apt purge -y docker docker-engine docker.io containerd runc || true
+sudo apt autoremove -y
+sudo rm -rf /var/lib/docker /var/lib/containerd
 
-# 自动获取 VPS 公网 IP
-IP=$(curl -s ifconfig.me || curl -s icanhazip.com)
-if [[ -z "$IP" ]]; then
-    echo "获取公网 IP 失败，请手动输入:"
-    read -rp "VPS 公网 IP: " IP
-fi
-echo "检测到 VPS 公网 IP: $IP"
+echo "===== Step 2: 安装 Docker 官方依赖 ====="
+sudo apt update
+sudo apt install -y ca-certificates curl gnupg lsb-release openssl
 
-# 安装必要软件
-echo "安装 Docker、docker-compose、curl、openssl..."
-apt update
-apt install -y docker.io docker-compose curl openssl || {
-    echo "软件安装失败，请检查网络或源"
-    exit 1
-}
+echo "===== Step 3: 添加 Docker 官方源 ====="
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt update
 
-# 启动 Docker
-echo "启动 Docker 服务..."
-systemctl enable docker
-systemctl start docker || {
-    echo "Docker 启动失败，请检查 systemctl 状态"
-    exit 1
-}
+echo "===== Step 4: 安装 Docker + Compose Plugin ====="
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-# 创建部署目录
+sudo systemctl enable docker
+sudo systemctl start docker
+
+echo "===== Step 5: 创建 Dendrite 部署目录 ====="
 DEPLOY_DIR=/opt/dendrite-deploy
-mkdir -p "$DEPLOY_DIR"
-cd "$DEPLOY_DIR"
+sudo mkdir -p $DEPLOY_DIR
+cd $DEPLOY_DIR
 
-# 随机生成 PostgreSQL 密码
+echo "===== Step 6: 生成 PostgreSQL 密码 ====="
 POSTGRES_PASSWORD=$(openssl rand -base64 12)
 echo "生成 PostgreSQL 密码: $POSTGRES_PASSWORD"
 
-# 创建必要目录和空文件
-mkdir -p media_store
-touch matrix_key.pem
-
-# 创建 docker-compose.yml
+echo "===== Step 7: 创建 docker-compose.yml ====="
 cat > docker-compose.yml <<EOF
 services:
   dendrite_postgres:
@@ -73,17 +63,17 @@ services:
       - "8448:8448"
       - "8800:8800"
     volumes:
-      - $DEPLOY_DIR/dendrite.yaml:/dendrite.yaml
-      - $DEPLOY_DIR/matrix_key.pem:/matrix_key.pem
-      - $DEPLOY_DIR/media_store:/media_store
+      - ./dendrite.yaml:/dendrite.yaml
+      - ./matrix_key.pem:/matrix_key.pem
+      - ./media_store:/media_store
 
 volumes:
   postgres_data:
 EOF
 
-# 创建 dendrite.yaml
+echo "===== Step 8: 创建最小可用 dendrite.yaml ====="
 cat > dendrite.yaml <<EOF
-server_name: "$IP"
+server_name: "$VPS_IP"
 pid_file: "/var/run/dendrite.pid"
 report_stats: false
 private_key_path: "./matrix_key.pem"
@@ -118,33 +108,12 @@ sync_api:
     connection_string: "postgres://postgres:$POSTGRES_PASSWORD@dendrite_postgres:5432/dendrite_sync?sslmode=disable"
 EOF
 
-# 启动容器
-echo "启动 Dendrite 容器..."
-docker compose up -d || {
-    echo "Docker 容器启动失败，请检查 docker compose 配置"
-    exit 1
-}
+echo "===== Step 9: 创建空目录和密钥占位 ====="
+mkdir -p media_store
+touch matrix_key.pem
 
-# 等待容器健康
-echo "等待 PostgreSQL 健康..."
-for i in {1..10}; do
-    STATUS=$(docker inspect -f '{{.State.Health.Status}}' dendrite_postgres 2>/dev/null || echo unknown)
-    if [[ "$STATUS" == "healthy" ]]; then
-        echo "PostgreSQL 已健康"
-        break
-    fi
-    echo "等待中... ($i/10)"
-    sleep 3
-done
+echo "===== Step 10: 启动 Dendrite 容器 ====="
+docker compose up -d
 
-# 检查 dendrite 容器状态
-DENDRITE_STATUS=$(docker inspect -f '{{.State.Status}}' dendrite)
-if [[ "$DENDRITE_STATUS" != "running" ]]; then
-    echo "Dendrite 容器未启动成功，请查看日志:"
-    docker logs dendrite
-    exit 1
-fi
-
-echo "===== 部署完成 ====="
-echo "查看日志：docker logs -f dendrite"
+echo "===== Step 11: 查看容器日志 ====="
 docker logs -f dendrite
