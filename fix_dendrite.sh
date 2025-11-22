@@ -1,30 +1,86 @@
 #!/bin/bash
-# ================================================
-# 一键修复 Dendrite 配置并重启容器
-# 适用环境: Ubuntu 22.04 + Docker Compose
-# ================================================
+set -e
 
+echo "======================================"
+echo " Ubuntu 22.04 Dendrite 一键部署脚本 "
+echo "======================================"
+
+# 1. 更新系统
+sudo apt update -y
+sudo apt upgrade -y
+
+# 2. 清理旧的 containerd / docker 冲突
+sudo apt remove -y docker docker-engine docker.io containerd containerd.io runc || true
+sudo apt autoremove -y
+
+# 3. 安装必要软件
+sudo apt install -y curl openssl
+
+# 4. 安装官方 Docker & Docker Compose
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+
+# 验证 Docker 安装
+docker --version
+docker compose version
+
+# 5. 启动并设置 Docker 开机启动
+sudo systemctl enable docker
+sudo systemctl start docker
+
+# 6. 创建部署目录
 DEPLOY_DIR="/opt/dendrite-deploy"
-CONFIG_FILE="$DEPLOY_DIR/dendrite.yaml"
-POSTGRES_PASSWORD="yourpassword"  # 修改为你的 PostgreSQL 密码
-SERVER_NAME="38.47.238.148"       # 修改为你的 VPS IP 或域名
+sudo mkdir -p "$DEPLOY_DIR"
+sudo chown "$USER":"$USER" "$DEPLOY_DIR"
+cd "$DEPLOY_DIR"
 
-echo "[1/4] 备份旧配置文件..."
-cp "$CONFIG_FILE" "$CONFIG_FILE.bak_$(date +%s)"
+# 7. 随机生成 PostgreSQL 密码
+POSTGRES_PASSWORD=$(openssl rand -base64 12)
+echo "生成 PostgreSQL 密码: $POSTGRES_PASSWORD"
 
-echo "[2/4] 写入新的 dendrite.yaml 配置..."
-cat > "$CONFIG_FILE" <<EOF
-server_name: "$SERVER_NAME"
+# 8. 创建 docker-compose.yml
+cat > docker-compose.yml <<EOF
+version: "3.9"
+
+services:
+  dendrite_postgres:
+    image: postgres:15
+    container_name: dendrite_postgres
+    environment:
+      POSTGRES_PASSWORD: $POSTGRES_PASSWORD
+      POSTGRES_DB: dendrite
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 5
+
+  dendrite:
+    image: matrixdotorg/dendrite-monolith:latest
+    container_name: dendrite
+    depends_on:
+      dendrite_postgres:
+        condition: service_healthy
+    ports:
+      - "8008:8008"
+      - "8448:8448"
+      - "8800:8800"
+    volumes:
+      - ./dendrite.yaml:/dendrite.yaml
+      - ./matrix_key.pem:/matrix_key.pem
+      - ./media_store:/media_store
+EOF
+
+# 9. 创建简化 dendrite.yaml
+cat > dendrite.yaml <<EOF
+server_name: "127.0.0.1"
 pid_file: "/var/run/dendrite.pid"
 report_stats: false
 private_key_path: "./matrix_key.pem"
 
 logging:
   level: info
-  hooks:
-    - type: file
-      level: info
-      path: "./dendrite.log"
 
 database:
   connection_string: "postgres://postgres:$POSTGRES_PASSWORD@dendrite_postgres:5432/dendrite?sslmode=disable"
@@ -53,10 +109,13 @@ sync_api:
     connection_string: "postgres://postgres:$POSTGRES_PASSWORD@dendrite_postgres:5432/dendrite_sync?sslmode=disable"
 EOF
 
-echo "[3/4] 重启 Dendrite 容器..."
-cd "$DEPLOY_DIR"
-docker compose restart dendrite
+# 10. 创建媒体存储目录和密钥占位
+mkdir -p media_store
+touch matrix_key.pem
 
-echo "[4/4] 查看 Dendrite 容器状态..."
-docker compose ps
+# 11. 启动容器
+docker compose up -d
+
+# 12. 显示启动日志
+echo "Dendrite 容器启动中，实时日志如下："
 docker logs -f dendrite
