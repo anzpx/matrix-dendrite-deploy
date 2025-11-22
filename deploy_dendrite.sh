@@ -1,19 +1,49 @@
 #!/bin/bash
 set -e
-echo "检测到 "
-DEPLOY_DIR="/opt/dendrite-deploy"
-mkdir -p "$DEPLOY_DIR/media_store"
-cd "$DEPLOY_DIR"
+
+# ================================
+# Matrix Dendrite 一键部署脚本
+# 自动获取 VPS 公网 IP，生成 PostgreSQL 密码
+# 带错误检测和日志输出
+# ================================
+
+echo "===== Matrix Dendrite 部署开始 ====="
 
 # 自动获取 VPS 公网 IP
-VPS_IP=$(curl -s https://api.ipify.org)
-echo "检测到 VPS 公网 IP: $VPS_IP"
+IP=$(curl -s ifconfig.me || curl -s icanhazip.com)
+if [[ -z "$IP" ]]; then
+    echo "获取公网 IP 失败，请手动输入:"
+    read -rp "VPS 公网 IP: " IP
+fi
+echo "检测到 VPS 公网 IP: $IP"
 
-# 生成安全 PostgreSQL 密码（只用字母和数字）
-POSTGRES_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)
+# 安装必要软件
+echo "安装 Docker、docker-compose、curl、openssl..."
+apt update
+apt install -y docker.io docker-compose curl openssl || {
+    echo "软件安装失败，请检查网络或源"
+    exit 1
+}
+
+# 启动 Docker
+echo "启动 Docker 服务..."
+systemctl enable docker
+systemctl start docker || {
+    echo "Docker 启动失败，请检查 systemctl 状态"
+    exit 1
+}
+
+# 创建部署目录
+DEPLOY_DIR=/opt/dendrite-deploy
+mkdir -p "$DEPLOY_DIR"
+cd "$DEPLOY_DIR"
+
+# 随机生成 PostgreSQL 密码
+POSTGRES_PASSWORD=$(openssl rand -base64 12)
 echo "生成 PostgreSQL 密码: $POSTGRES_PASSWORD"
 
-# 创建空密钥文件
+# 创建必要目录和空文件
+mkdir -p media_store
 touch matrix_key.pem
 
 # 创建 docker-compose.yml
@@ -43,16 +73,17 @@ services:
       - "8448:8448"
       - "8800:8800"
     volumes:
-      - ./matrix_key.pem:/matrix_key.pem
-      - ./media_store:/media_store
-      - ./dendrite.yaml:/dendrite.yaml
+      - $DEPLOY_DIR/dendrite.yaml:/dendrite.yaml
+      - $DEPLOY_DIR/matrix_key.pem:/matrix_key.pem
+      - $DEPLOY_DIR/media_store:/media_store
+
 volumes:
   postgres_data:
 EOF
 
-# 创建 dendrite.yaml（安全替换变量）
+# 创建 dendrite.yaml
 cat > dendrite.yaml <<EOF
-server_name: "$VPS_IP"
+server_name: "$IP"
 pid_file: "/var/run/dendrite.pid"
 report_stats: false
 private_key_path: "./matrix_key.pem"
@@ -88,7 +119,32 @@ sync_api:
 EOF
 
 # 启动容器
-docker compose up -d
+echo "启动 Dendrite 容器..."
+docker compose up -d || {
+    echo "Docker 容器启动失败，请检查 docker compose 配置"
+    exit 1
+}
 
-# 查看日志
+# 等待容器健康
+echo "等待 PostgreSQL 健康..."
+for i in {1..10}; do
+    STATUS=$(docker inspect -f '{{.State.Health.Status}}' dendrite_postgres 2>/dev/null || echo unknown)
+    if [[ "$STATUS" == "healthy" ]]; then
+        echo "PostgreSQL 已健康"
+        break
+    fi
+    echo "等待中... ($i/10)"
+    sleep 3
+done
+
+# 检查 dendrite 容器状态
+DENDRITE_STATUS=$(docker inspect -f '{{.State.Status}}' dendrite)
+if [[ "$DENDRITE_STATUS" != "running" ]]; then
+    echo "Dendrite 容器未启动成功，请查看日志:"
+    docker logs dendrite
+    exit 1
+fi
+
+echo "===== 部署完成 ====="
+echo "查看日志：docker logs -f dendrite"
 docker logs -f dendrite
