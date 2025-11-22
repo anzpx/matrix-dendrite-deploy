@@ -2,7 +2,7 @@
 set -e
 
 echo "============================="
-echo "  一键部署 Matrix Dendrite "
+echo " 一键部署 Matrix Dendrite V1.0 "
 echo "============================="
 
 # 自动获取 VPS 公网 IP
