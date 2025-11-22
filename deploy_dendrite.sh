@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================
-# 安全版 Dendrite 一键部署脚本
+# 安全版 Dendrite 一键部署脚本（修正版）
 # ==============================
 set -e
 
@@ -39,13 +39,19 @@ done
 # Step 2: 创建部署目录
 # ------------------------------
 echo "===== Step 2: 创建部署目录 ====="
-mkdir -p $DEPLOY_DIR
+mkdir -p $DEPLOY_DIR/keys
 cd $DEPLOY_DIR
 
 # ------------------------------
-# Step 3: 生成 docker-compose.yml
+# Step 3: 生成私钥文件
 # ------------------------------
-echo "===== Step 3: 创建 docker-compose.yml ====="
+echo "===== Step 3: 生成私钥文件 ====="
+openssl genrsa -out keys/matrix_key.pem 2048
+
+# ------------------------------
+# Step 4: 生成 docker-compose.yml
+# ------------------------------
+echo "===== Step 4: 创建 docker-compose.yml ====="
 cat > docker-compose.yml <<EOF
 services:
   postgres:
@@ -63,47 +69,49 @@ services:
   dendrite:
     image: matrixdotorg/dendrite-monolith:latest
     container_name: dendrite
-    depends_on:
-      postgres:
-        condition: service_healthy
     ports:
       - "8008:8008"
       - "8448:8448"
     volumes:
       - ./dendrite.yaml:/etc/dendrite/dendrite.yaml:ro
+      - ./keys/matrix_key.pem:/etc/dendrite/matrix_key.pem:ro
 
 volumes:
   postgres_data:
 EOF
 
 # ------------------------------
-# Step 4: 生成最小 dendrite.yaml
+# Step 5: 生成最小 dendrite.yaml
 # ------------------------------
-echo "===== Step 4: 创建 dendrite.yaml ====="
+echo "===== Step 5: 创建 dendrite.yaml ====="
 cat > dendrite.yaml <<EOF
 server_name: "$IP"
+
 database:
   accounts:
     connection_string: "postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/postgres?sslmode=disable"
+
+key:
+  private_key: "/etc/dendrite/matrix_key.pem"
 EOF
 
 # ------------------------------
-# Step 5: 拉取镜像
+# Step 6: 拉取镜像
 # ------------------------------
-echo "===== Step 5: 拉取 Docker 镜像 ====="
+echo "===== Step 6: 拉取 Docker 镜像 ====="
 docker pull postgres:15 || { echo "Postgres 镜像拉取失败，请检查网络"; exit 1; }
 docker pull matrixdotorg/dendrite-monolith:latest || { echo "Dendrite 镜像拉取失败，请检查网络"; exit 1; }
 
 # ------------------------------
-# Step 6: 启动容器
+# Step 7: 启动容器
 # ------------------------------
-echo "===== Step 6: 启动容器 ====="
+echo "===== Step 7: 启动容器 ====="
 docker compose up -d
 
 # ------------------------------
-# Step 7: 状态检查
+# Step 8: 状态检查
 # ------------------------------
-echo "===== Step 7: 状态检查 ====="
+echo "===== Step 8: 状态检查 ====="
 sleep 5
 docker ps -a
 
