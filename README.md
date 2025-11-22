@@ -17,8 +17,16 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendri
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/install.sh)"
 ```
 
+
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/fix_dendrite.sh)"
+```
+
+
+安装Docker
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/install_docker.sh)"
 ```
 
 执行后会依次提示输入：
