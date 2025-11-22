@@ -1,57 +1,68 @@
 #!/bin/bash
+# ==============================
+# 安全版 Dendrite 一键部署脚本
+# ==============================
 set -e
 
-# 自动获取 VPS 公网 IP
-IP=$(curl -s https://ipinfo.io/ip)
+DEPLOY_DIR="/opt/dendrite-deploy"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(openssl rand -base64 16)}"
+
+# 获取公网 IP
+IP=$(curl -s https://api.ipify.org)
 echo "检测到 VPS 公网 IP: $IP"
+echo "生成 PostgreSQL 密码: $POSTGRES_PASSWORD"
 
-# 安装依赖
-apt update && apt install -y curl openssl docker.io docker-compose
+# ------------------------------
+# Step 1: 安装必要软件
+# ------------------------------
+echo "===== Step 1: 安装 Docker、docker-compose、curl、openssl ====="
+if ! command -v docker >/dev/null; then
+    echo "安装 Docker..."
+    apt update && apt install -y ca-certificates curl gnupg lsb-release
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+      | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    apt update
+    apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+fi
 
-# 启动 Docker
-systemctl enable docker --now
+for cmd in curl openssl; do
+    if ! command -v $cmd >/dev/null; then
+        echo "安装 $cmd ..."
+        apt update && apt install -y $cmd
+    fi
+done
 
-# 创建部署目录
-DEPLOY_DIR=/opt/dendrite-deploy
+# ------------------------------
+# Step 2: 创建部署目录
+# ------------------------------
+echo "===== Step 2: 创建部署目录 ====="
 mkdir -p $DEPLOY_DIR
 cd $DEPLOY_DIR
 
-# 生成 PostgreSQL 密码
-POSTGRES_PASSWORD=$(openssl rand -base64 16)
-echo "生成 PostgreSQL 密码: $POSTGRES_PASSWORD"
-
-# 创建最小 dendrite.yaml
-cat > dendrite.yaml <<EOF
-server_name: "$IP"
-pid_file: "/var/run/dendrite.pid"
-database:
-  type: "postgres"
-  connection_string: "postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/dendrite?sslmode=disable"
-EOF
-
-# 生成 Docker Compose 文件
+# ------------------------------
+# Step 3: 生成 docker-compose.yml
+# ------------------------------
+echo "===== Step 3: 创建 docker-compose.yml ====="
 cat > docker-compose.yml <<EOF
-version: "3.9"
-
 services:
   postgres:
     image: postgres:15
     container_name: dendrite_postgres
-    restart: unless-stopped
     environment:
-      POSTGRES_PASSWORD: $POSTGRES_PASSWORD
+      POSTGRES_PASSWORD: "$POSTGRES_PASSWORD"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
+      interval: 10s
       retries: 5
 
   dendrite:
     image: matrixdotorg/dendrite-monolith:latest
     container_name: dendrite
-    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -59,14 +70,41 @@ services:
       - "8008:8008"
       - "8448:8448"
     volumes:
-      - ./dendrite.yaml:/etc/dendrite/dendrite.yaml
+      - ./dendrite.yaml:/etc/dendrite/dendrite.yaml:ro
 
 volumes:
   postgres_data:
 EOF
 
-# 启动容器
+# ------------------------------
+# Step 4: 生成最小 dendrite.yaml
+# ------------------------------
+echo "===== Step 4: 创建 dendrite.yaml ====="
+cat > dendrite.yaml <<EOF
+server_name: "$IP"
+database:
+  accounts:
+    connection_string: "postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/postgres?sslmode=disable"
+EOF
+
+# ------------------------------
+# Step 5: 拉取镜像
+# ------------------------------
+echo "===== Step 5: 拉取 Docker 镜像 ====="
+docker pull postgres:15 || { echo "Postgres 镜像拉取失败，请检查网络"; exit 1; }
+docker pull matrixdotorg/dendrite-monolith:latest || { echo "Dendrite 镜像拉取失败，请检查网络"; exit 1; }
+
+# ------------------------------
+# Step 6: 启动容器
+# ------------------------------
+echo "===== Step 6: 启动容器 ====="
 docker compose up -d
 
+# ------------------------------
+# Step 7: 状态检查
+# ------------------------------
+echo "===== Step 7: 状态检查 ====="
+sleep 5
+docker ps -a
+
 echo "部署完成！访问客户端 API: http://$IP:8008"
-echo "PostgreSQL 密码: $POSTGRES_PASSWORD"
