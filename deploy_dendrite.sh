@@ -3,6 +3,7 @@
 # 安全版 Dendrite 一键部署脚本（修正版）
 # ==============================
 set -e
+echo "Dendrite 一键部署脚本（修正版）"
 
 DEPLOY_DIR="/opt/dendrite-deploy"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(openssl rand -base64 16)}"
