@@ -28,6 +28,12 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendri
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/install_docker.sh)"
 ```
+安装
+
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/deploy_dendrite.sh)"
+```
 
 执行后会依次提示输入：
 1. 域名或 VPS IP
