@@ -1,11 +1,10 @@
 #!/bin/bash
 # ==============================
-# 安全版 Dendrite 一键部署脚本（升级版）
+# 官方结构升级版 Dendrite 一键部署脚本
 # ==============================
 set -e
 
 DEPLOY_DIR="/opt/dendrite-deploy"
-KEY_DIR="$DEPLOY_DIR/keys"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(openssl rand -base64 16)}"
 
 # 获取公网 IP
@@ -35,25 +34,16 @@ for cmd in curl openssl; do
 done
 
 # ------------------------------
-# Step 2: 创建部署目录和私钥目录
+# Step 2: 创建部署目录和子目录
 # ------------------------------
-echo "===== Step 2: 创建部署目录 ====="
-mkdir -p $DEPLOY_DIR $KEY_DIR
+echo "===== Step 2: 创建目录结构 ====="
+mkdir -p $DEPLOY_DIR/media_store
 cd $DEPLOY_DIR
 
 # ------------------------------
-# Step 3: 生成私钥
+# Step 3: 生成 Docker Compose 文件
 # ------------------------------
-echo "===== Step 3: 生成 Dendrite 私钥 ====="
-if [ ! -f "$KEY_DIR/matrix_key.pem" ]; then
-    openssl genpkey -algorithm ED25519 -out "$KEY_DIR/matrix_key.pem"
-    chmod 400 "$KEY_DIR/matrix_key.pem"
-fi
-
-# ------------------------------
-# Step 4: 生成 docker-compose.yml
-# ------------------------------
-echo "===== Step 4: 创建 docker-compose.yml ====="
+echo "===== Step 3: 创建 docker-compose.yml ====="
 cat > docker-compose.yml <<EOF
 services:
   postgres:
@@ -79,16 +69,17 @@ services:
       - "8448:8448"
     volumes:
       - ./dendrite.yaml:/etc/dendrite/dendrite.yaml:ro
-      - ./keys/matrix_key.pem:/etc/dendrite/matrix_key.pem:ro
+      - ./matrix_key.pem:/etc/dendrite/matrix_key.pem:ro
+      - ./media_store:/var/dendrite/media_store:rw
 
 volumes:
   postgres_data:
 EOF
 
 # ------------------------------
-# Step 5: 生成最小 dendrite.yaml
+# Step 4: 生成 dendrite.yaml 配置
 # ------------------------------
-echo "===== Step 5: 创建 dendrite.yaml ====="
+echo "===== Step 4: 创建 dendrite.yaml ====="
 cat > dendrite.yaml <<EOF
 server_name: "$IP"
 key:
@@ -96,45 +87,48 @@ key:
 database:
   accounts:
     connection_string: "postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/postgres?sslmode=disable"
+media_api:
+  base_path: "/var/dendrite/media_store"
 EOF
 
 # ------------------------------
-# Step 6: 拉取 Docker 镜像
+# Step 5: 生成私钥
+# ------------------------------
+echo "===== Step 5: 生成私钥 ====="
+if [ ! -f matrix_key.pem ]; then
+    openssl genrsa -out matrix_key.pem 2048
+    chmod 600 matrix_key.pem
+fi
+
+# ------------------------------
+# Step 6: 拉取镜像
 # ------------------------------
 echo "===== Step 6: 拉取 Docker 镜像 ====="
-docker pull postgres:15 || { echo "Postgres 镜像拉取失败"; exit 1; }
-docker pull matrixdotorg/dendrite-monolith:latest || { echo "Dendrite 镜像拉取失败"; exit 1; }
+docker pull postgres:15
+docker pull matrixdotorg/dendrite-monolith:latest
 
 # ------------------------------
 # Step 7: 启动容器
 # ------------------------------
 echo "===== Step 7: 启动容器 ====="
-docker compose up -d --remove-orphans
+docker compose down --remove-orphans
+docker compose up -d
 
 # ------------------------------
-# Step 8: 等待 Postgres 健康
+# Step 8: 检查 Dendrite 是否运行
 # ------------------------------
-echo "===== Step 8: 等待 Postgres 健康 ====="
-for i in {1..30}; do
-    STATUS=$(docker inspect --format='{{.State.Health.Status}}' dendrite_postgres)
-    if [ "$STATUS" == "healthy" ]; then
-        echo "Postgres 已健康"
-        break
-    fi
-    echo "等待 Postgres 健康中... ($i/30)"
-    sleep 2
-done
-
-# ------------------------------
-# Step 9: 启动 Dendrite
-# ------------------------------
-docker restart dendrite
-
-# ------------------------------
-# Step 10: 状态检查
-# ------------------------------
-echo "===== Step 10: 状态检查 ====="
+echo "===== Step 8: 检查 Dendrite 容器 ====="
 sleep 5
-docker ps -a
 
-echo "1部署完成！访问客户端 API: http://$IP:8008"
+STATUS=$(docker inspect -f '{{.State.Status}}' dendrite)
+if [ "$STATUS" != "running" ]; then
+    echo "Dendrite 容器启动失败，显示日志："
+    docker logs dendrite --tail 50
+    echo "尝试重启容器..."
+    docker compose restart dendrite
+    sleep 5
+    docker logs dendrite --tail 50
+fi
+
+docker ps -a
+echo "部署完成！访问客户端 API: http://$IP:8008"
