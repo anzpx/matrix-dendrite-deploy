@@ -1,12 +1,3 @@
-我看到了几个问题。让我帮您修复这个脚本：
-
-1. docker-compose 命令问题 - 您安装的是 docker-compose-plugin 但脚本中使用的是 docker compose
-2. 权限问题 - 需要确保 Docker 服务运行
-3. 配置文件路径问题 - Dendrite 的配置可能需要调整
-
-这是修复后的脚本：
-
-```bash
 #!/bin/bash
 # ==============================
 # 安全版 Dendrite 升级一键部署脚本
@@ -293,26 +284,3 @@ echo "1. 配置防火墙开放端口 8008 和 8448"
 echo "2. 可以使用 Element 等客户端连接服务器"
 echo "3. 查看日志: docker logs -f dendrite"
 echo "=========================================="
-```
-
-主要修复内容：
-
-1. 权限检查 - 添加了 root 用户检查
-2. Docker 服务管理 - 确保 Docker 服务启动
-3. docker-compose 兼容性 - 添加了兼容性检查
-4. 完整的 dendrite.yaml - 提供了更完整的配置
-5. 改进的错误处理 - 添加了重试机制和更好的状态检查
-6. 服务健康检查 - 检查 Matrix 服务是否真正可用
-
-运行前请确保：
-
-· 系统是 Ubuntu/Debian
-· 有足够的磁盘空间
-· 防火墙开放了 8008 和 8448 端口
-
-运行命令：
-
-```bash
-chmod +x deploy_dendrite.sh
-sudo ./deploy_dendrite.sh
-```
