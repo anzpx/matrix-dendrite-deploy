@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================
-# 官方结构升级版 Dendrite 一键部署脚本
+# 安全版 Dendrite 升级一键部署脚本
 # ==============================
 set -e
 
@@ -17,6 +17,7 @@ echo "生成 PostgreSQL 密码: $POSTGRES_PASSWORD"
 # ------------------------------
 echo "===== Step 1: 安装 Docker、docker-compose、curl、openssl ====="
 if ! command -v docker >/dev/null; then
+    echo "安装 Docker..."
     apt update && apt install -y ca-certificates curl gnupg lsb-release
     mkdir -p /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -29,21 +30,51 @@ fi
 
 for cmd in curl openssl; do
     if ! command -v $cmd >/dev/null; then
+        echo "安装 $cmd ..."
         apt update && apt install -y $cmd
     fi
 done
 
 # ------------------------------
-# Step 2: 创建部署目录和子目录
+# Step 2: 创建部署目录
 # ------------------------------
-echo "===== Step 2: 创建目录结构 ====="
+echo "===== Step 2: 创建部署目录 ====="
 mkdir -p $DEPLOY_DIR/media_store
 cd $DEPLOY_DIR
 
 # ------------------------------
-# Step 3: 生成 Docker Compose 文件
+# Step 3: 清理旧容器和卷
 # ------------------------------
-echo "===== Step 3: 创建 docker-compose.yml ====="
+echo "===== Step 3: 清理旧容器和卷 ====="
+docker compose down --remove-orphans || true
+docker system prune -af || true
+
+# ------------------------------
+# Step 4: 生成密钥文件
+# ------------------------------
+if [ ! -f matrix_key.pem ]; then
+    echo "===== Step 4: 生成 matrix_key.pem ====="
+    openssl genpkey -algorithm RSA -out matrix_key.pem -pkeyopt rsa_keygen_bits:2048
+fi
+
+# ------------------------------
+# Step 5: 生成 dendrite.yaml
+# ------------------------------
+echo "===== Step 5: 创建 dendrite.yaml ====="
+cat > dendrite.yaml <<EOF
+server_name: "$IP"
+private_key_path: "/etc/dendrite/matrix_key.pem"
+database:
+  accounts:
+    connection_string: "postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/postgres?sslmode=disable"
+media_api:
+  base_path: "/var/dendrite/media_store"
+EOF
+
+# ------------------------------
+# Step 6: 生成 docker-compose.yml
+# ------------------------------
+echo "===== Step 6: 创建 docker-compose.yml ====="
 cat > docker-compose.yml <<EOF
 services:
   postgres:
@@ -77,58 +108,31 @@ volumes:
 EOF
 
 # ------------------------------
-# Step 4: 生成 dendrite.yaml 配置
+# Step 7: 拉取镜像
 # ------------------------------
-echo "===== Step 4: 创建 dendrite.yaml ====="
-cat > dendrite.yaml <<EOF
-server_name: "$IP"
-key:
-  private_key: "/etc/dendrite/matrix_key.pem"
-database:
-  accounts:
-    connection_string: "postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/postgres?sslmode=disable"
-media_api:
-  base_path: "/var/dendrite/media_store"
-EOF
-
-# ------------------------------
-# Step 5: 生成私钥
-# ------------------------------
-echo "===== Step 5: 生成私钥 ====="
-if [ ! -f matrix_key.pem ]; then
-    openssl genrsa -out matrix_key.pem 2048
-    chmod 600 matrix_key.pem
-fi
-
-# ------------------------------
-# Step 6: 拉取镜像
-# ------------------------------
-echo "===== Step 6: 拉取 Docker 镜像 ====="
+echo "===== Step 7: 拉取 Docker 镜像 ====="
 docker pull postgres:15
 docker pull matrixdotorg/dendrite-monolith:latest
 
 # ------------------------------
-# Step 7: 启动容器
+# Step 8: 启动容器
 # ------------------------------
-echo "===== Step 7: 启动容器 ====="
-docker compose down --remove-orphans
+echo "===== Step 8: 启动容器 ====="
 docker compose up -d
 
 # ------------------------------
-# Step 8: 检查 Dendrite 是否运行
+# Step 9: 检查容器状态，失败输出日志
 # ------------------------------
-echo "===== Step 8: 检查 Dendrite 容器 ====="
+echo "===== Step 9: 状态检查 ====="
 sleep 5
+docker ps -a
 
-STATUS=$(docker inspect -f '{{.State.Status}}' dendrite)
-if [ "$STATUS" != "running" ]; then
-    echo "Dendrite 容器启动失败，显示日志："
-    docker logs dendrite --tail 50
-    echo "尝试重启容器..."
-    docker compose restart dendrite
-    sleep 5
-    docker logs dendrite --tail 50
+# 检查 dendrite 容器状态
+DENDRITE_STATUS=$(docker inspect -f '{{.State.Status}}' dendrite || echo "not_found")
+if [ "$DENDRITE_STATUS" != "running" ]; then
+    echo "⚠️ dendrite 容器未启动成功，输出日志如下："
+    docker logs dendrite || echo "无法读取日志"
+    exit 1
 fi
 
-docker ps -a
-echo "部署完成！访问客户端 API: http://$IP:8008"
+echo "✅ 部署完成！访问客户端 API: http://$IP:8008"
