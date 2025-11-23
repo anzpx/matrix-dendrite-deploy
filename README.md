@@ -18,6 +18,12 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-dock
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/fix_dendrite.sh)"
 ```
 
+清理安装
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/fix_dendrite_final.sh)"
+```
+
 执行后会依次提示输入：
 1. 域名或 VPS IP
 2. PostgreSQL 数据库密码
