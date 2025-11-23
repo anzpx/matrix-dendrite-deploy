@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-echo "======================================"
-echo " Matrix Dendrite 全自动部署 & 运维脚本"
-echo "======================================"
+echo "========================================="
+echo " Matrix Dendrite 全自动部署 & 运维脚本 V0.1 "
+echo "========================================="
 
 # -------------------------------
 # 获取公网 IP
@@ -46,7 +46,7 @@ fi
 # ===============================
 ADMIN_USER="admin"
 ADMIN_PASS=$(head -c32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c16)
-echo "管理员账号请首次通过 Element Web 手动注册"
+echo "首次管理员账号请通过 Element Web 手动注册"
 echo "推荐用户名: $ADMIN_USER"
 echo "推荐随机密码: $ADMIN_PASS"
 
@@ -59,9 +59,7 @@ PGPASS=$(head -c24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
 # 生成 docker-compose.yml
 # ===============================
 cat > /opt/docker-compose.yml <<EOF
-version: "3.8"
 services:
-
   postgres:
     container_name: dendrite_postgres
     image: postgres:15
@@ -103,10 +101,8 @@ EOF
 # 生成 Caddyfile
 # ===============================
 if [[ "$SERVER_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    # IP → 自签证书
     TLS_SETTING="tls internal"
 else
-    # 域名 → ACME 自动签发
     TLS_SETTING="tls { issuer acme }"
 fi
 
@@ -156,6 +152,8 @@ docker run --rm --entrypoint="/usr/bin/generate-keys" \
   -tls-cert /mnt/server.crt \
   -tls-key /mnt/server.key
 
+chmod 644 $INSTALL_DIR/config/*
+
 # ===============================
 # 生成 dendrite.yaml
 # ===============================
@@ -166,6 +164,15 @@ docker run --rm --entrypoint="/usr/bin/generate-config" \
   -server "${SERVER_NAME}" \
   > "$INSTALL_DIR/config/dendrite.yaml"
 sed -i 's#/var/dendrite#/etc/dendrite#g' "$INSTALL_DIR/config/dendrite.yaml"
+
+# ===============================
+# 等待 Postgres 就绪再启动 Dendrite
+# ===============================
+echo "等待 PostgreSQL 就绪..."
+until docker exec dendrite_postgres pg_isready -U dendrite >/dev/null 2>&1; do
+  sleep 2
+done
+echo "PostgreSQL 已就绪"
 
 # ===============================
 # 启动所有服务
