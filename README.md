@@ -12,8 +12,11 @@
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/install_dendrite.sh)"
 ```
+修复脚本
 
-
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/fix_dendrite.sh)"
+```
 
 执行后会依次提示输入：
 1. 域名或 VPS IP
