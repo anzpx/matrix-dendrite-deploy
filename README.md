@@ -24,13 +24,17 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-dock
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/fix_dendrite_final.sh)"
 ```
 
-
 修复密码
-
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/fix_password.sh)"
 ```
+修复共享密钥
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/final_fix.sh)"
+```
+
 
 执行后会依次提示输入：
 1. 域名或 VPS IP
