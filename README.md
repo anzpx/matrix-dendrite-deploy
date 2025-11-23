@@ -41,7 +41,7 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-dock
 6. 修复SSL
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/final_fix.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/fix_ssl.sh)"
 ```
 
 执行后会依次提示输入：
