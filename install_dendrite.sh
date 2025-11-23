@@ -145,6 +145,184 @@ install_docker_compose() {
 }
 
 # -------------------------------
+# 卸载相关函数
+# -------------------------------
+complete_uninstall() {
+    if confirm "确定要完全卸载并删除所有数据吗？此操作不可恢复！"; then
+        log "开始完全卸载 Matrix Dendrite..."
+        
+        # 停止并删除容器
+        if [ -f "$DOCKER_COMPOSE_FILE" ]; then
+            docker compose -f "$DOCKER_COMPOSE_FILE" down -v >> "$LOG_FILE" 2>&1 || true
+        fi
+        
+        # 删除所有相关目录和文件
+        rm -rf "$INSTALL_DIR" "$WEB_DIR" "$CADDY_DIR" "$DOCKER_COMPOSE_FILE"
+        
+        # 清理 Docker 资源
+        docker system prune -f >> "$LOG_FILE" 2>&1 || true
+        
+        log "完全卸载完成，所有数据已删除"
+    else
+        log "卸载操作已取消"
+    fi
+}
+
+uninstall_preserve_data() {
+    if confirm "确定要卸载但保留数据卷和配置吗？"; then
+        log "开始卸载 Matrix Dendrite（保留数据）..."
+        
+        # 停止容器但不删除数据卷
+        if [ -f "$DOCKER_COMPOSE_FILE" ]; then
+            docker compose -f "$DOCKER_COMPOSE_FILE" down >> "$LOG_FILE" 2>&1 || true
+        fi
+        
+        # 删除配置和程序文件，但保留数据目录
+        rm -rf "$WEB_DIR" "$CADDY_DIR" "$DOCKER_COMPOSE_FILE"
+        
+        log "卸载完成，数据卷和配置已保留在 $INSTALL_DIR"
+        info "如需重新安装，数据将保持不变"
+    else
+        log "卸载操作已取消"
+    fi
+}
+
+# -------------------------------
+# 升级相关函数
+# -------------------------------
+upgrade_services() {
+    log "开始升级服务..."
+    
+    if [ ! -f "$DOCKER_COMPOSE_FILE" ]; then
+        error "未找到 Docker Compose 文件，请先安装服务"
+        return 1
+    fi
+    
+    # 备份当前配置
+    backup_database_quick
+    
+    # 拉取最新镜像
+    info "拉取最新 Docker 镜像..."
+    docker compose -f "$DOCKER_COMPOSE_FILE" pull >> "$LOG_FILE" 2>&1
+    
+    # 重启服务
+    docker compose -f "$DOCKER_COMPOSE_FILE" down >> "$LOG_FILE" 2>&1
+    docker compose -f "$DOCKER_COMPOSE_FILE" up -d >> "$LOG_FILE" 2>&1
+    
+    # 等待服务启动
+    info "等待服务启动..."
+    wait_for_service postgres
+    wait_for_service dendrite
+    wait_for_service element-web
+    wait_for_service caddy
+    
+    log "服务升级完成"
+}
+
+# -------------------------------
+# 备份相关函数
+# -------------------------------
+backup_database() {
+    log "开始备份数据库..."
+    
+    mkdir -p "$BACKUP_DIR"
+    DATE=$(date +'%Y%m%d_%H%M%S')
+    BACKUP_FILE="$BACKUP_DIR/dendrite_backup_$DATE.sql"
+    
+    if ! docker compose -f "$DOCKER_COMPOSE_FILE" ps postgres | grep -q "Up"; then
+        error "PostgreSQL 服务未运行，无法备份"
+        return 1
+    fi
+    
+    info "正在备份数据库到 $BACKUP_FILE..."
+    
+    if docker exec dendrite_postgres pg_dump -U dendrite dendrite > "$BACKUP_FILE" 2>> "$LOG_FILE"; then
+        # 压缩备份文件
+        gzip "$BACKUP_FILE"
+        local backup_size
+        backup_size=$(du -h "${BACKUP_FILE}.gz" | cut -f1)
+        log "备份完成: ${BACKUP_FILE}.gz (${backup_size})"
+        
+        # 清理旧备份（保留最近7天）
+        find "$BACKUP_DIR" -name "dendrite_backup_*.sql.gz" -mtime +7 -delete >> "$LOG_FILE" 2>&1
+    else
+        error "数据库备份失败"
+        return 1
+    fi
+}
+
+backup_database_quick() {
+    # 快速备份，用于升级前的自动备份
+    local DATE
+    DATE=$(date +'%Y%m%d_%H%M%S')
+    local BACKUP_FILE="$BACKUP_DIR/quick_backup_$DATE.sql"
+    
+    if docker compose -f "$DOCKER_COMPOSE_FILE" ps postgres | grep -q "Up"; then
+        docker exec dendrite_postgres pg_dump -U dendrite dendrite > "$BACKUP_FILE" 2>/dev/null && gzip "$BACKUP_FILE"
+    fi
+}
+
+# -------------------------------
+# 状态监控函数
+# -------------------------------
+show_status() {
+    log "服务状态检查..."
+    
+    if [ ! -f "$DOCKER_COMPOSE_FILE" ]; then
+        error "未找到 Docker Compose 文件，服务可能未安装"
+        return 1
+    fi
+    
+    echo
+    echo "======================================"
+    echo "           服务状态信息"
+    echo "======================================"
+    
+    # Docker Compose 状态
+    docker compose -f "$DOCKER_COMPOSE_FILE" ps
+    
+    echo
+    echo "--------------------------------------"
+    echo "容器资源使用情况:"
+    docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" \
+        dendrite_postgres dendrite_server element_web caddy_proxy 2>/dev/null || true
+    
+    echo
+    echo "--------------------------------------"
+    echo "最近日志:"
+    docker compose -f "$DOCKER_COMPOSE_FILE" logs --tail=10
+    
+    echo "======================================"
+}
+
+show_logs() {
+    if [ ! -f "$DOCKER_COMPOSE_FILE" ]; then
+        error "未找到 Docker Compose 文件，服务可能未安装"
+        return 1
+    fi
+    
+    echo "选择要查看的日志："
+    echo "1) 所有服务日志"
+    echo "2) Dendrite 日志"
+    echo "3) PostgreSQL 日志"
+    echo "4) Element Web 日志"
+    echo "5) Caddy 日志"
+    echo "0) 返回"
+    
+    read -p "请输入数字: " log_choice
+    
+    case "$log_choice" in
+        1) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f ;;
+        2) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f dendrite ;;
+        3) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f postgres ;;
+        4) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f element-web ;;
+        5) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f caddy ;;
+        0) return ;;
+        *) error "无效选项" ;;
+    esac
+}
+
+# -------------------------------
 # 主要功能函数
 # -------------------------------
 install_dendrite() {
@@ -443,9 +621,6 @@ show_success_message() {
     echo "======================================"
 }
 
-# 其他功能函数（升级、备份、卸载等）...
-# 由于长度限制，这里省略具体实现，但建议按照类似模式重构
-
 # -------------------------------
 # 主菜单
 # -------------------------------
@@ -476,7 +651,7 @@ main_menu() {
         6) show_status ;;
         7) show_logs ;;
         0) echo "退出脚本"; exit 0 ;;
-        *) error "无效选项"; exit 1 ;;
+        *) error "无效选项"; main_menu ;;
     esac
 }
 
