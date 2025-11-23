@@ -2,20 +2,18 @@
 set -e
 
 echo "======================================"
-echo " Matrix Dendrite + Caddy + Element-Web"
-echo "       全自动一键部署脚本"
+echo " Matrix Dendrite 全自动部署 & 运维脚本"
 echo "======================================"
 
-# -------------------------------
-# 获取公网 IP
-# -------------------------------
+# ===============================
+# 自动获取公网 IP
+# ===============================
 PUBLIC_IP=$(curl -fsS ifconfig.me || hostname -I | awk '{print $1}')
 if [ -z "$PUBLIC_IP" ]; then
-    echo "无法获取公网 IP，请手动输入"
-    read -p "请输入你的服务器公网 IP 或域名: " PUBLIC_IP
+    read -p "无法获取公网 IP，请手动输入服务器公网 IP 或域名: " PUBLIC_IP
 fi
 
-read -p "请输入域名（可直接回车使用自动获取 IP ${PUBLIC_IP}）: " SERVER_NAME
+read -p "请输入域名（回车使用自动获取 IP ${PUBLIC_IP}）: " SERVER_NAME
 SERVER_NAME=${SERVER_NAME:-$PUBLIC_IP}
 echo "使用域名/IP: $SERVER_NAME"
 
@@ -25,12 +23,11 @@ echo "使用域名/IP: $SERVER_NAME"
 INSTALL_DIR="/opt/dendrite"
 WEB_DIR="/opt/element-web"
 CADDY_DIR="/opt/caddy"
-mkdir -p $INSTALL_DIR/config $INSTALL_DIR/pgdata
-mkdir -p $WEB_DIR
-mkdir -p $CADDY_DIR
+BACKUP_DIR="$INSTALL_DIR/backups"
+mkdir -p $INSTALL_DIR/config $INSTALL_DIR/pgdata $WEB_DIR $CADDY_DIR $BACKUP_DIR
 
 # ===============================
-# 安装 Docker
+# 安装 Docker & Docker Compose
 # ===============================
 if ! command -v docker &>/dev/null; then
     curl -fsSL https://get.docker.com | bash
@@ -43,6 +40,14 @@ if ! docker compose version &>/dev/null && ! command -v docker-compose &>/dev/nu
     -o /usr/local/bin/docker-compose
     chmod +x /usr/local/bin/docker-compose
 fi
+
+# ===============================
+# 自动生成管理员账号
+# ===============================
+ADMIN_USER="admin"
+ADMIN_PASS=$(head -c32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c16)
+echo "管理员账号: $ADMIN_USER"
+echo "管理员密码: $ADMIN_PASS"
 
 # ===============================
 # PostgreSQL 密码
@@ -93,7 +98,7 @@ services:
 EOF
 
 # ===============================
-# 生成 Caddyfile（自动 HTTPS + 反向代理）
+# 生成 Caddyfile
 # ===============================
 cat > $CADDY_DIR/Caddyfile <<EOF
 ${SERVER_NAME} {
@@ -137,7 +142,6 @@ EOF
 # 清理旧私钥 & 生成新私钥 + TLS
 # ===============================
 rm -f $INSTALL_DIR/config/matrix_key.pem $INSTALL_DIR/config/server.crt $INSTALL_DIR/config/server.key
-
 docker run --rm --entrypoint="/usr/bin/generate-keys" \
   -v "$INSTALL_DIR/config":/mnt matrixdotorg/dendrite-monolith:latest \
   -private-key /mnt/matrix_key.pem \
@@ -153,7 +157,6 @@ docker run --rm --entrypoint="/usr/bin/generate-config" \
   -db "postgres://dendrite:${PGPASS}@postgres/dendrite?sslmode=disable" \
   -server "${SERVER_NAME}" \
   > "$INSTALL_DIR/config/dendrite.yaml"
-
 sed -i 's#/var/dendrite#/etc/dendrite#g' "$INSTALL_DIR/config/dendrite.yaml"
 
 # ===============================
@@ -161,6 +164,42 @@ sed -i 's#/var/dendrite#/etc/dendrite#g' "$INSTALL_DIR/config/dendrite.yaml"
 # ===============================
 docker compose -f /opt/docker-compose.yml up -d
 
+# ===============================
+# 初始化管理员账号
+# ===============================
+docker exec -i $(docker ps -q -f name=dendrite) \
+    dendrite-cli register --username $ADMIN_USER --password $ADMIN_PASS --admin
+
+# ===============================
+# 数据库备份脚本
+# ===============================
+cat > $INSTALL_DIR/backup.sh <<EOF
+#!/bin/bash
+DATE=\$(date +'%Y%m%d_%H%M')
+docker exec -t \$(docker ps -q -f name=postgres) pg_dumpall -U dendrite > $BACKUP_DIR/dendrite_\$DATE.sql
+EOF
+chmod +x $INSTALL_DIR/backup.sh
+
+# ===============================
+# 自动升级脚本
+# ===============================
+cat > $INSTALL_DIR/upgrade.sh <<EOF
+#!/bin/bash
+echo "停止旧容器..."
+docker compose -f /opt/docker-compose.yml down
+echo "拉取最新镜像..."
+docker pull matrixdotorg/dendrite-monolith:latest
+docker pull vectorim/element-web
+docker pull caddy:2.7
+echo "重新启动..."
+docker compose -f /opt/docker-compose.yml up -d
+echo "升级完成!"
+EOF
+chmod +x $INSTALL_DIR/upgrade.sh
+
+# ===============================
+# 完成提示
+# ===============================
 echo "======================================"
 echo "        Matrix 全套服务部署成功"
 echo "======================================"
@@ -170,7 +209,11 @@ echo "客户端 API:"
 echo "   https://${SERVER_NAME}/_matrix"
 echo "联邦 API:"
 echo "   https://${SERVER_NAME}/_matrix/federation"
+echo "管理员账号:"
+echo "   用户名: $ADMIN_USER"
+echo "   密码: $ADMIN_PASS"
 echo
-echo "查看日志:"
-echo "   docker compose -f /opt/docker-compose.yml logs -f"
+echo "备份命令: $INSTALL_DIR/backup.sh"
+echo "升级命令: $INSTALL_DIR/upgrade.sh"
+echo "查看日志: docker compose -f /opt/docker-compose.yml logs -f"
 echo "======================================"
