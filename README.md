@@ -56,6 +56,13 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-dock
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/http_only.sh)"
 ```
 
+9. 切换到Nginx
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/nginx_setup.sh)"
+```
+
+
 执行后会依次提示输入：
 1. 域名或 VPS IP
 2. PostgreSQL 数据库密码
