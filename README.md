@@ -44,6 +44,12 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-dock
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/fix_ssl.sh)"
 ```
 
+7. 修复SSL2
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/fix_https_final.sh)"
+```
+
 执行后会依次提示输入：
 1. 域名或 VPS IP
 2. PostgreSQL 数据库密码
