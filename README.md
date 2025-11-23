@@ -9,32 +9,40 @@
 
 ## 快速部署
 
+1. 安装脚本
+
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/install_dendrite.sh)"
 ```
-修复脚本
+2. 修复脚本
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/fix_dendrite.sh)"
 ```
 
-清理安装
+3. 清理安装
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/fix_dendrite_final.sh)"
 ```
 
-修复密码
+4. 修复密码
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/fix_password.sh)"
 ```
-修复共享密钥
+
+5. 修复共享密钥
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/final_fix.sh)"
 ```
 
+6. 修复SSL
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/dendrite-docker-compose/main/final_fix.sh)"
+```
 
 执行后会依次提示输入：
 1. 域名或 VPS IP
