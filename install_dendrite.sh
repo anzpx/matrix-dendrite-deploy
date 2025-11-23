@@ -1,13 +1,14 @@
 #!/bin/bash
 set -e
 
-echo "=========================================="
-echo " Matrix Dendrite 全自动部署 & 运维脚本 V0.2"
-echo "=========================================="
+echo "======================================"
+echo " Matrix Dendrite + Caddy + Element-Web"
+echo "       全自动部署稳定版脚本"
+echo "======================================"
 
-# -------------------------------
-# 获取公网 IP
-# -------------------------------
+# ===============================
+# 自动获取公网 IP
+# ===============================
 PUBLIC_IP=$(curl -fsS ifconfig.me || hostname -I | awk '{print $1}')
 if [ -z "$PUBLIC_IP" ]; then
     read -p "无法获取公网 IP，请手动输入服务器公网 IP 或域名: " PUBLIC_IP
@@ -18,7 +19,7 @@ SERVER_NAME=${SERVER_NAME:-$PUBLIC_IP}
 echo "使用域名/IP: $SERVER_NAME"
 
 # ===============================
-# 创建目录结构
+# 创建目录
 # ===============================
 INSTALL_DIR="/opt/dendrite"
 WEB_DIR="/opt/element-web"
@@ -27,7 +28,7 @@ BACKUP_DIR="$INSTALL_DIR/backups"
 mkdir -p $INSTALL_DIR/config $INSTALL_DIR/pgdata $WEB_DIR $CADDY_DIR $BACKUP_DIR
 
 # ===============================
-# 安装 Docker & Docker Compose
+# 安装 Docker
 # ===============================
 if ! command -v docker &>/dev/null; then
     curl -fsSL https://get.docker.com | bash
@@ -42,24 +43,23 @@ if ! docker compose version &>/dev/null && ! command -v docker-compose &>/dev/nu
 fi
 
 # ===============================
-# 管理员账号（首次通过 Element Web 注册）
+# 密码生成
 # ===============================
 ADMIN_USER="admin"
 ADMIN_PASS=$(head -c32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c16)
-echo "首次管理员账号请通过 Element Web 手动注册"
-echo "推荐用户名: $ADMIN_USER"
-echo "推荐随机密码: $ADMIN_PASS"
-
-# ===============================
-# PostgreSQL 密码
-# ===============================
 PGPASS=$(head -c24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
+
+echo "管理员账号: $ADMIN_USER"
+echo "管理员密码: $ADMIN_PASS"
+echo "Postgres 密码已生成"
 
 # ===============================
 # 生成 docker-compose.yml
 # ===============================
 cat > /opt/docker-compose.yml <<EOF
+version: "3.8"
 services:
+
   postgres:
     container_name: dendrite_postgres
     image: postgres:15
@@ -101,15 +101,17 @@ EOF
 # 生成 Caddyfile
 # ===============================
 if [[ "$SERVER_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    TLS_SETTING="tls internal"
+    # IP → 自签证书
+    TLS_MODE="internal"
 else
-    TLS_SETTING="tls { issuer acme }"
+    # 域名 → ACME 自动签证书
+    TLS_MODE="acme"
 fi
 
 cat > $CADDY_DIR/Caddyfile <<EOF
 ${SERVER_NAME} {
     encode gzip
-    ${TLS_SETTING}
+    tls ${TLS_MODE}
 
     @element path /
     reverse_proxy @element element-web:80
@@ -125,7 +127,7 @@ ${SERVER_NAME} {
 EOF
 
 # ===============================
-# 生成 Element Web config.json
+# Element-Web 配置
 # ===============================
 cat > $WEB_DIR/config.json <<EOF
 {
@@ -143,7 +145,7 @@ cat > $WEB_DIR/config.json <<EOF
 EOF
 
 # ===============================
-# 清理旧私钥 & 生成新私钥 + TLS
+# 清理旧私钥 & 生成新 TLS + 私钥
 # ===============================
 rm -f $INSTALL_DIR/config/matrix_key.pem $INSTALL_DIR/config/server.crt $INSTALL_DIR/config/server.key
 docker run --rm --entrypoint="/usr/bin/generate-keys" \
@@ -151,8 +153,6 @@ docker run --rm --entrypoint="/usr/bin/generate-keys" \
   -private-key /mnt/matrix_key.pem \
   -tls-cert /mnt/server.crt \
   -tls-key /mnt/server.key
-
-chmod 644 $INSTALL_DIR/config/*
 
 # ===============================
 # 生成 dendrite.yaml
@@ -166,16 +166,7 @@ docker run --rm --entrypoint="/usr/bin/generate-config" \
 sed -i 's#/var/dendrite#/etc/dendrite#g' "$INSTALL_DIR/config/dendrite.yaml"
 
 # ===============================
-# 等待 Postgres 就绪再启动 Dendrite
-# ===============================
-echo "等待 PostgreSQL 就绪..."
-until docker exec dendrite_postgres pg_isready -U dendrite >/dev/null 2>&1; do
-  sleep 2
-done
-echo "PostgreSQL 已就绪"
-
-# ===============================
-# 启动所有服务
+# 启动服务
 # ===============================
 docker compose -f /opt/docker-compose.yml up -d
 
@@ -200,7 +191,7 @@ echo "拉取最新镜像..."
 docker pull matrixdotorg/dendrite-monolith:latest
 docker pull vectorim/element-web
 docker pull caddy:2.7
-echo "重新启动..."
+echo "重新启动服务..."
 docker compose -f /opt/docker-compose.yml up -d
 echo "升级完成!"
 EOF
@@ -218,9 +209,9 @@ echo "客户端 API:"
 echo "   https://${SERVER_NAME}/_matrix"
 echo "联邦 API:"
 echo "   https://${SERVER_NAME}/_matrix/federation"
-echo "首次管理员账号请通过 Element Web 注册"
-echo "推荐用户名: $ADMIN_USER"
-echo "推荐随机密码: $ADMIN_PASS"
+echo "管理员账号:"
+echo "   用户名: $ADMIN_USER"
+echo "   密码: $ADMIN_PASS"
 echo
 echo "备份命令: $INSTALL_DIR/backup.sh"
 echo "升级命令: $INSTALL_DIR/upgrade.sh"
