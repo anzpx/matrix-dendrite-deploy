@@ -10,30 +10,10 @@
 ## 快速部署
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/install_dendrite_interactive.sh)"
-```
-
-```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/install.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/install_dendrite.sh)"
 ```
 
 
-```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/fix_dendrite.sh)"
-```
-
-
-安装Docker
-
-```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/install_docker.sh)"
-```
-安装
-
-
-```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendrite-deploy/main/deploy_dendrite.sh)"
-```
 
 执行后会依次提示输入：
 1. 域名或 VPS IP
@@ -47,4 +27,3 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/anzpx/matrix-dendri
 - `/opt/dendrite/logs/install.log` 安装日志
 - `/opt/dendrite/logs/nginx_access.log` 访问日志
 - `/opt/dendrite/logs/nginx_error.log` 错误日志
-
