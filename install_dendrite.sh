@@ -455,7 +455,7 @@ configure_shared_secret() {
 # -------------------------------
 # 维护功能函数
 # -------------------------------
-enable_registration() {
+enable_registration1() {
     log "开启公开用户注册..."
     
     if [ ! -f "$INSTALL_DIR/config/dendrite.yaml" ]; then
@@ -468,6 +468,65 @@ enable_registration() {
     
     # 重启 Dendrite 服务
     docker compose -f "$DOCKER_COMPOSE_FILE" restart dendrite >> "$LOG_FILE" 2>&1
+    
+    log "✅ 已开启公开用户注册"
+    info "现在任何人都可以注册账户，无需邀请"
+    
+    # 显示当前注册状态
+    show_registration_status
+}
+
+enable_registration() {
+    log "开启公开用户注册..."
+    
+    if [ ! -f "$INSTALL_DIR/config/dendrite.yaml" ]; then
+        error "Dendrite 配置文件不存在: $INSTALL_DIR/config/dendrite.yaml"
+        return 1
+    fi
+    
+    # 备份原配置
+    cp "$INSTALL_DIR/config/dendrite.yaml" "$INSTALL_DIR/config/dendrite.yaml.backup"
+    
+    # 更灵活的配置修改
+    if grep -q "registration_requires_token: true" "$INSTALL_DIR/config/dendrite.yaml"; then
+        sed -i 's/registration_requires_token: true/registration_requires_token: false/' "$INSTALL_DIR/config/dendrite.yaml"
+        log "已修改 registration_requires_token: false"
+    else
+        # 如果配置项不存在，添加它
+        if grep -q "client_api:" "$INSTALL_DIR/config/dendrite.yaml"; then
+            sed -i '/client_api:/a\ \ registration_requires_token: false' "$INSTALL_DIR/config/dendrite.yaml"
+            log "已添加 registration_requires_token: false"
+        else
+            error "找不到 client_api 配置段"
+            return 1
+        fi
+    fi
+    
+    # 确保 enable_registration 也是 true
+    if grep -q "enable_registration:" "$INSTALL_DIR/config/dendrite.yaml"; then
+        sed -i 's/enable_registration: false/enable_registration: true/' "$INSTALL_DIR/config/dendrite.yaml"
+    else
+        sed -i '/client_api:/a\ \ enable_registration: true' "$INSTALL_DIR/config/dendrite.yaml"
+    fi
+    
+    # 验证配置修改
+    if grep -q "registration_requires_token: false" "$INSTALL_DIR/config/dendrite.yaml" && \
+       grep -q "enable_registration: true" "$INSTALL_DIR/config/dendrite.yaml"; then
+        log "配置修改验证成功"
+    else
+        error "配置修改验证失败"
+        return 1
+    fi
+    
+    # 完全重启服务（不只是 restart）
+    log "重启 Dendrite 服务..."
+    docker compose -f "$DOCKER_COMPOSE_FILE" stop dendrite >> "$LOG_FILE" 2>&1
+    sleep 5
+    docker compose -f "$DOCKER_COMPOSE_FILE" start dendrite >> "$LOG_FILE" 2>&1
+    
+    # 等待服务完全启动
+    info "等待 Dendrite 服务启动..."
+    wait_for_service dendrite
     
     log "✅ 已开启公开用户注册"
     info "现在任何人都可以注册账户，无需邀请"
