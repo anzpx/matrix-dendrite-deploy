@@ -177,7 +177,7 @@ generate_ssl_cert() {
     local server_name=$1
     
     if is_domain "$server_name"; then
-        # 使用域名，申请 Let's Encrypt 证书[citation:5]
+        # 使用域名，申请 Let's Encrypt 证书
         log "检测到域名 $server_name，尝试申请 Let's Encrypt 证书..."
         
         if install_certbot; then
@@ -192,14 +192,14 @@ generate_ssl_cert() {
             # 停止 nginx 以释放 80 端口进行验证
             systemctl stop nginx || true
             
-            # 尝试申请证书[citation:5]
+            # 尝试申请证书
             if certbot certonly --standalone --agree-tos --register-unsafely-without-email \
                 -d "$server_name" --non-interactive >> "$LOG_FILE" 2>&1; then
                 log "✅ Let's Encrypt 证书申请成功"
                 SSL_CERT="/etc/letsencrypt/live/$server_name/fullchain.pem"
                 SSL_KEY="/etc/letsencrypt/live/$server_name/privkey.pem"
                 
-                # 设置证书自动续期[citation:5]
+                # 设置证书自动续期
                 setup_certbot_renewal "$server_name"
                 return 0
             else
@@ -210,7 +210,7 @@ generate_ssl_cert() {
         fi
     fi
     
-    # 使用 IP 或证书申请失败时，生成自签名证书[citation:5]
+    # 使用 IP 或证书申请失败时，生成自签名证书
     log "生成自签名 SSL 证书..."
     mkdir -p $NGINX_DIR/ssl
     
@@ -230,7 +230,7 @@ generate_ssl_cert() {
 
 setup_certbot_renewal() {
     local domain=$1
-    log "设置证书自动续期[citation:5]"
+    log "设置证书自动续期"
     
     # 创建续期钩子脚本
     cat > /etc/letsencrypt/renewal-hooks/post/reload-nginx.sh << EOF
@@ -239,7 +239,7 @@ systemctl reload nginx
 EOF
     chmod +x /etc/letsencrypt/renewal-hooks/post/reload-nginx.sh
     
-    # 测试续期[citation:5]
+    # 测试续期
     if certbot renew --dry-run >> "$LOG_FILE" 2>&1; then
         log "证书自动续期测试成功"
     else
@@ -319,7 +319,7 @@ server {
     listen 80;
     server_name $server_name;
     
-    # 用于 Let's Encrypt 证书续期验证[citation:5]
+    # 用于 Let's Encrypt 证书续期验证
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/html;
         default_type "text/plain";
@@ -342,7 +342,7 @@ server {
     ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers off;
 
-    # 安全头[citation:5]
+    # 安全头
     add_header Strict-Transport-Security "max-age=63072000" always;
     add_header X-Content-Type-Options nosniff;
     add_header X-Frame-Options DENY;
@@ -435,8 +435,8 @@ generate_dendrite_config() {
         # 修复路径
         sed -i 's#/var/dendrite#/etc/dendrite#g' $INSTALL_DIR/config/dendrite.yaml
         
-        # 启用开放注册
-        sed -i 's/registration_requires_token: true/registration_requires_token: false/' $INSTALL_DIR/config/dendrite.yaml
+        # 默认关闭公开注册
+        sed -i 's/registration_requires_token: true/registration_requires_token: true/' $INSTALL_DIR/config/dendrite.yaml
     fi
 }
 
@@ -449,6 +449,169 @@ configure_shared_secret() {
         sed -i "s/registration_shared_secret:.*/registration_shared_secret: \"$SHARED_SECRET\"/" $INSTALL_DIR/config/dendrite.yaml
     else
         sed -i "/client_api:/a\ \ registration_shared_secret: \"$SHARED_SECRET\"" $INSTALL_DIR/config/dendrite.yaml
+    fi
+}
+
+# -------------------------------
+# 维护功能函数
+# -------------------------------
+enable_registration() {
+    log "开启公开用户注册..."
+    
+    if [ ! -f "$INSTALL_DIR/config/dendrite.yaml" ]; then
+        error "Dendrite 配置文件不存在"
+        return 1
+    fi
+    
+    # 修改配置允许公开注册
+    sed -i 's/registration_requires_token: true/registration_requires_token: false/' $INSTALL_DIR/config/dendrite.yaml
+    
+    # 重启 Dendrite 服务
+    docker compose -f "$DOCKER_COMPOSE_FILE" restart dendrite >> "$LOG_FILE" 2>&1
+    
+    log "✅ 已开启公开用户注册"
+    info "现在任何人都可以注册账户，无需邀请"
+    
+    # 显示当前注册状态
+    show_registration_status
+}
+
+disable_registration() {
+    log "关闭公开用户注册..."
+    
+    if [ ! -f "$INSTALL_DIR/config/dendrite.yaml" ]; then
+        error "Dendrite 配置文件不存在"
+        return 1
+    fi
+    
+    # 修改配置要求注册令牌
+    sed -i 's/registration_requires_token: false/registration_requires_token: true/' $INSTALL_DIR/config/dendrite.yaml
+    
+    # 重启 Dendrite 服务
+    docker compose -f "$DOCKER_COMPOSE_FILE" restart dendrite >> "$LOG_FILE" 2>&1
+    
+    log "✅ 已关闭公开用户注册"
+    info "现在新用户需要注册令牌才能创建账户"
+    
+    # 显示当前注册状态
+    show_registration_status
+}
+
+show_registration_status() {
+    if [ ! -f "$INSTALL_DIR/config/dendrite.yaml" ]; then
+        error "Dendrite 配置文件不存在"
+        return 1
+    fi
+    
+    local status
+    if grep -q "registration_requires_token: false" "$INSTALL_DIR/config/dendrite.yaml"; then
+        status="✅ 公开注册已开启 - 任何人都可以注册"
+    else
+        status="🔒 公开注册已关闭 - 需要注册令牌"
+    fi
+    
+    echo
+    echo "=== 注册状态 ==="
+    echo "$status"
+    echo
+}
+
+backup_database() {
+    log "开始备份数据库..."
+    
+    mkdir -p "$BACKUP_DIR"
+    DATE=$(date +'%Y%m%d_%H%M%S')
+    BACKUP_FILE="$BACKUP_DIR/dendrite_backup_$DATE.sql"
+    
+    if ! docker compose -f "$DOCKER_COMPOSE_FILE" ps postgres | grep -q "Up"; then
+        error "PostgreSQL 服务未运行，无法备份"
+        return 1
+    fi
+    
+    info "正在备份数据库到 $BACKUP_FILE..."
+    
+    if docker exec dendrite_postgres pg_dump -U dendrite dendrite > "$BACKUP_FILE" 2>> "$LOG_FILE"; then
+        # 压缩备份文件
+        gzip "$BACKUP_FILE"
+        local backup_size
+        backup_size=$(du -h "${BACKUP_FILE}.gz" | cut -f1)
+        log "备份完成: ${BACKUP_FILE}.gz (${backup_size})"
+        
+        # 清理旧备份（保留最近7天）
+        find "$BACKUP_DIR" -name "dendrite_backup_*.sql.gz" -mtime +7 -delete >> "$LOG_FILE" 2>&1
+    else
+        error "数据库备份失败"
+        return 1
+    fi
+}
+
+view_backups() {
+    log "查看备份文件..."
+    
+    if [ ! -d "$BACKUP_DIR" ] || [ -z "$(ls -A $BACKUP_DIR 2>/dev/null)" ]; then
+        warn "备份目录为空或不存在"
+        return 1
+    fi
+    
+    echo
+    echo "=== 备份文件列表 ==="
+    ls -lh "$BACKUP_DIR"/*.sql.gz 2>/dev/null | awk '{print $6" "$7" "$8" "$9}' | while read line; do
+        echo "📦 $line"
+    done
+    
+    local total_size
+    total_size=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
+    echo
+    info "备份目录总大小: $total_size"
+}
+
+clean_old_backups() {
+    log "清理旧备份..."
+    
+    if confirm "确定要删除7天前的备份文件吗？"; then
+        local deleted_count
+        deleted_count=$(find "$BACKUP_DIR" -name "dendrite_backup_*.sql.gz" -mtime +7 -delete -print | wc -l)
+        
+        if [ "$deleted_count" -gt 0 ]; then
+            log "已删除 $deleted_count 个旧备份文件"
+        else
+            info "没有找到需要删除的旧备份文件"
+        fi
+    fi
+}
+
+create_new_user() {
+    log "创建新用户..."
+    
+    read -p "请输入新用户名: " username
+    if [[ -z "$username" ]]; then
+        error "用户名不能为空"
+        return 1
+    fi
+    
+    local password
+    password=$(generate_password)
+    
+    info "新用户账号: $username"
+    info "初始密码: $password"
+    
+    # 等待Dendrite完全启动
+    sleep 5
+    
+    if docker exec dendrite_server /usr/bin/create-account \
+        -config /etc/dendrite/dendrite.yaml \
+        -username "$username" \
+        -password "$password" >> "$LOG_FILE" 2>&1; then
+        log "✅ 用户 $username 创建成功"
+        echo
+        echo "用户信息:"
+        echo "用户名: $username"
+        echo "密码: $password"
+        echo
+        info "请提醒用户首次登录后修改密码"
+    else
+        error "用户创建失败"
+        return 1
     fi
 }
 
@@ -640,6 +803,7 @@ show_success_message() {
     echo "重要提示:"
     echo "1. 查看日志: docker compose -f $DOCKER_COMPOSE_FILE logs"
     echo "2. 备份目录: $BACKUP_DIR"
+    echo "3. 当前注册策略: 🔒 需要注册令牌 (可在维护菜单中修改)"
     echo "======================================"
 }
 
@@ -725,7 +889,50 @@ show_status() {
         echo "使用自签名证书"
     fi
     
+    # 显示注册状态
+    show_registration_status
+    
     echo "======================================"
+}
+
+# -------------------------------
+# 维护菜单
+# -------------------------------
+maintenance_menu() {
+    echo
+    echo "======================================"
+    echo "           Matrix 维护菜单"
+    echo "======================================"
+    echo
+    echo "请选择维护操作："
+    echo "1) 开启公开用户注册"
+    echo "2) 关闭公开用户注册 (需要注册令牌)"
+    echo "3) 查看当前注册状态"
+    echo "4) 创建新用户账户"
+    echo "5) 备份数据库"
+    echo "6) 查看备份文件"
+    echo "7) 清理旧备份"
+    echo "0) 返回主菜单"
+    echo
+    read -p "请输入数字: " OPTION
+
+    case "$OPTION" in
+        1) enable_registration ;;
+        2) disable_registration ;;
+        3) show_registration_status ;;
+        4) create_new_user ;;
+        5) backup_database ;;
+        6) view_backups ;;
+        7) clean_old_backups ;;
+        0) return ;;
+        *) error "无效选项"; maintenance_menu ;;
+    esac
+    
+    # 返回维护菜单
+    if [ $? -eq 0 ]; then
+        read -p "按回车键继续..."
+        maintenance_menu
+    fi
 }
 
 # -------------------------------
@@ -743,6 +950,7 @@ main_menu() {
     echo "3) 升级服务"
     echo "4) 查看服务状态"
     echo "5) 查看服务日志"
+    echo "6) 维护菜单"
     echo "0) 退出"
     echo
     read -p "请输入数字: " OPTION
@@ -768,6 +976,7 @@ main_menu() {
                 5) tail -f /var/log/nginx/access.log /var/log/nginx/error.log ;;
             esac
             ;;
+        6) maintenance_menu ;;
         0) echo "退出脚本"; exit 0 ;;
         *) error "无效选项"; main_menu ;;
     esac
