@@ -5,9 +5,9 @@ echo "======================================"
 echo " Matrix Dendrite 全自动部署 & 运维脚本"
 echo "======================================"
 
-# ===============================
-# 自动获取公网 IP
-# ===============================
+# -------------------------------
+# 获取公网 IP
+# -------------------------------
 PUBLIC_IP=$(curl -fsS ifconfig.me || hostname -I | awk '{print $1}')
 if [ -z "$PUBLIC_IP" ]; then
     read -p "无法获取公网 IP，请手动输入服务器公网 IP 或域名: " PUBLIC_IP
@@ -42,12 +42,13 @@ if ! docker compose version &>/dev/null && ! command -v docker-compose &>/dev/nu
 fi
 
 # ===============================
-# 自动生成管理员账号
+# 管理员账号（首次通过 Element Web 注册）
 # ===============================
 ADMIN_USER="admin"
 ADMIN_PASS=$(head -c32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c16)
-echo "管理员账号: $ADMIN_USER"
-echo "管理员密码: $ADMIN_PASS"
+echo "管理员账号请首次通过 Element Web 手动注册"
+echo "推荐用户名: $ADMIN_USER"
+echo "推荐随机密码: $ADMIN_PASS"
 
 # ===============================
 # PostgreSQL 密码
@@ -62,6 +63,7 @@ version: "3.8"
 services:
 
   postgres:
+    container_name: dendrite_postgres
     image: postgres:15
     restart: unless-stopped
     environment:
@@ -100,12 +102,18 @@ EOF
 # ===============================
 # 生成 Caddyfile
 # ===============================
+if [[ "$SERVER_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    # IP → 自签证书
+    TLS_SETTING="tls internal"
+else
+    # 域名 → ACME 自动签发
+    TLS_SETTING="tls { issuer acme }"
+fi
+
 cat > $CADDY_DIR/Caddyfile <<EOF
 ${SERVER_NAME} {
     encode gzip
-    tls {
-        issuer acme
-    }
+    ${TLS_SETTING}
 
     @element path /
     reverse_proxy @element element-web:80
@@ -165,18 +173,12 @@ sed -i 's#/var/dendrite#/etc/dendrite#g' "$INSTALL_DIR/config/dendrite.yaml"
 docker compose -f /opt/docker-compose.yml up -d
 
 # ===============================
-# 初始化管理员账号
-# ===============================
-docker exec -i $(docker ps -q -f name=dendrite) \
-    dendrite-cli register --username $ADMIN_USER --password $ADMIN_PASS --admin
-
-# ===============================
 # 数据库备份脚本
 # ===============================
 cat > $INSTALL_DIR/backup.sh <<EOF
 #!/bin/bash
 DATE=\$(date +'%Y%m%d_%H%M')
-docker exec -t \$(docker ps -q -f name=postgres) pg_dumpall -U dendrite > $BACKUP_DIR/dendrite_\$DATE.sql
+docker exec -t dendrite_postgres pg_dumpall -U dendrite > $BACKUP_DIR/dendrite_\$DATE.sql
 EOF
 chmod +x $INSTALL_DIR/backup.sh
 
@@ -209,9 +211,9 @@ echo "客户端 API:"
 echo "   https://${SERVER_NAME}/_matrix"
 echo "联邦 API:"
 echo "   https://${SERVER_NAME}/_matrix/federation"
-echo "管理员账号:"
-echo "   用户名: $ADMIN_USER"
-echo "   密码: $ADMIN_PASS"
+echo "首次管理员账号请通过 Element Web 注册"
+echo "推荐用户名: $ADMIN_USER"
+echo "推荐随机密码: $ADMIN_PASS"
 echo
 echo "备份命令: $INSTALL_DIR/backup.sh"
 echo "升级命令: $INSTALL_DIR/upgrade.sh"
