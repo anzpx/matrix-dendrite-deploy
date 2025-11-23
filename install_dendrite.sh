@@ -74,6 +74,11 @@ get_public_ip() {
     echo "$ip"
 }
 
+is_domain() {
+    # 检查是否是域名格式（非IP地址）
+    [[ ! "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
 wait_for_service() {
     local service=$1
     local max_attempts=30
@@ -153,24 +158,98 @@ install_nginx() {
     log "Nginx 安装完成"
 }
 
+install_certbot() {
+    if command -v certbot &>/dev/null; then
+        log "Certbot 已安装"
+        return 0
+    fi
+    
+    log "安装 Certbot..."
+    apt update >> "$LOG_FILE" 2>&1
+    apt install -y certbot python3-certbot-nginx >> "$LOG_FILE" 2>&1
+    log "Certbot 安装完成"
+}
+
 # -------------------------------
-# 配置生成函数
+# 证书管理函数
 # -------------------------------
 generate_ssl_cert() {
-    log "生成 SSL 证书..."
+    local server_name=$1
+    
+    if is_domain "$server_name"; then
+        # 使用域名，申请 Let's Encrypt 证书[citation:5]
+        log "检测到域名 $server_name，尝试申请 Let's Encrypt 证书..."
+        
+        if install_certbot; then
+            # 检查是否已经存在证书
+            if certbot certificates 2>/dev/null | grep -q "$server_name"; then
+                log "找到现有证书，使用现有证书"
+                SSL_CERT="/etc/letsencrypt/live/$server_name/fullchain.pem"
+                SSL_KEY="/etc/letsencrypt/live/$server_name/privkey.pem"
+                return 0
+            fi
+            
+            # 停止 nginx 以释放 80 端口进行验证
+            systemctl stop nginx || true
+            
+            # 尝试申请证书[citation:5]
+            if certbot certonly --standalone --agree-tos --register-unsafely-without-email \
+                -d "$server_name" --non-interactive >> "$LOG_FILE" 2>&1; then
+                log "✅ Let's Encrypt 证书申请成功"
+                SSL_CERT="/etc/letsencrypt/live/$server_name/fullchain.pem"
+                SSL_KEY="/etc/letsencrypt/live/$server_name/privkey.pem"
+                
+                # 设置证书自动续期[citation:5]
+                setup_certbot_renewal "$server_name"
+                return 0
+            else
+                warn "Let's Encrypt 证书申请失败，将使用自签名证书"
+            fi
+        else
+            warn "Certbot 安装失败，将使用自签名证书"
+        fi
+    fi
+    
+    # 使用 IP 或证书申请失败时，生成自签名证书[citation:5]
+    log "生成自签名 SSL 证书..."
     mkdir -p $NGINX_DIR/ssl
     
-    if [[ ! -f $NGINX_DIR/ssl/nginx.crt ]]; then
+    if [[ ! -f $NGINX_DIR/ssl/nginx.crt ]] || [[ ! -f $NGINX_DIR/ssl/nginx.key ]]; then
         openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
             -keyout $NGINX_DIR/ssl/nginx.key \
             -out $NGINX_DIR/ssl/nginx.crt \
-            -subj "/C=US/ST=State/L=City/O=Organization/CN=$SERVER_NAME" 2>> "$LOG_FILE"
-        log "SSL 证书生成完成"
+            -subj "/C=US/ST=State/L=City/O=Organization/CN=$server_name" 2>> "$LOG_FILE"
+        log "自签名 SSL 证书生成完成"
     else
-        log "SSL 证书已存在，跳过生成"
+        log "自签名 SSL 证书已存在，跳过生成"
+    fi
+    
+    SSL_CERT="$NGINX_DIR/ssl/nginx.crt"
+    SSL_KEY="$NGINX_DIR/ssl/nginx.key"
+}
+
+setup_certbot_renewal() {
+    local domain=$1
+    log "设置证书自动续期[citation:5]"
+    
+    # 创建续期钩子脚本
+    cat > /etc/letsencrypt/renewal-hooks/post/reload-nginx.sh << EOF
+#!/bin/bash
+systemctl reload nginx
+EOF
+    chmod +x /etc/letsencrypt/renewal-hooks/post/reload-nginx.sh
+    
+    # 测试续期[citation:5]
+    if certbot renew --dry-run >> "$LOG_FILE" 2>&1; then
+        log "证书自动续期测试成功"
+    else
+        warn "证书自动续期测试失败，请手动检查"
     fi
 }
 
+# -------------------------------
+# 配置生成函数
+# -------------------------------
 generate_docker_compose() {
     log "生成 Docker Compose 配置..."
     
@@ -217,29 +296,57 @@ EOF
 }
 
 generate_nginx_config() {
+    local server_name=$1
+    local ssl_cert=$2
+    local ssl_key=$3
+    
     log "生成 Nginx 配置..."
     
     # 创建配置目录
     mkdir -p $NGINX_DIR/sites-available $NGINX_DIR/sites-enabled
     
+    # 检查是否使用 Let's Encrypt 证书
+    local is_letsencrypt=false
+    if [[ "$ssl_cert" == *"letsencrypt"* ]]; then
+        is_letsencrypt=true
+        log "使用 Let's Encrypt 证书配置"
+    else
+        log "使用自签名证书配置"
+    fi
+    
     cat > $NGINX_DIR/sites-available/matrix <<EOF
 server {
     listen 80;
-    server_name $SERVER_NAME;
-    return 301 https://\$server_name\$request_uri;
+    server_name $server_name;
+    
+    # 用于 Let's Encrypt 证书续期验证[citation:5]
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+    
+    # 其他 HTTP 请求重定向到 HTTPS
+    location / {
+        return 301 https://\$server_name\$request_uri;
+    }
 }
 
 server {
     listen 443 ssl http2;
-    server_name $SERVER_NAME;
+    server_name $server_name;
 
-    ssl_certificate $NGINX_DIR/ssl/nginx.crt;
-    ssl_certificate_key $NGINX_DIR/ssl/nginx.key;
+    ssl_certificate $ssl_cert;
+    ssl_certificate_key $ssl_key;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers off;
 
+    # 安全头[citation:5]
     add_header Strict-Transport-Security "max-age=63072000" always;
+    add_header X-Content-Type-Options nosniff;
+    add_header X-Frame-Options DENY;
+    add_header X-XSS-Protection "1; mode=block";
 
     # Client-Server API
     location /_matrix/client {
@@ -280,17 +387,23 @@ EOF
     # 启用站点
     ln -sf $NGINX_DIR/sites-available/matrix $NGINX_DIR/sites-enabled/
     rm -f $NGINX_DIR/sites-enabled/default
+    
+    # 创建 Let's Encrypt 验证目录
+    mkdir -p /var/www/html/.well-known/acme-challenge
+    chmod -R 755 /var/www/html
 }
 
 generate_element_config() {
+    local server_name=$1
+    
     log "生成 Element Web 配置..."
     
     cat > $WEB_DIR/config.json <<EOF
 {
     "default_server_config": {
         "m.homeserver": {
-            "base_url": "https://$SERVER_NAME",
-            "server_name": "$SERVER_NAME"
+            "base_url": "https://$server_name",
+            "server_name": "$server_name"
         }
     },
     "brand": "Element"
@@ -352,9 +465,12 @@ start_services() {
     info "等待数据库启动..."
     wait_for_service postgres || return 1
     
+    # 启动 Nginx
+    systemctl start nginx >> "$LOG_FILE" 2>&1
+    
     # 测试Nginx配置并重启
     if nginx -t >> "$LOG_FILE" 2>&1; then
-        systemctl restart nginx >> "$LOG_FILE" 2>&1
+        systemctl reload nginx >> "$LOG_FILE" 2>&1
         log "Nginx 配置验证并重启完成"
     else
         error "Nginx 配置验证失败"
@@ -426,6 +542,20 @@ test_services() {
     else
         warn "⚠ Matrix Client API 可能有问题"
     fi
+    
+    # 显示证书信息
+    echo
+    info "证书信息:"
+    if is_domain "$SERVER_NAME" && [[ "$SSL_CERT" == *"letsencrypt"* ]]; then
+        log "✅ 使用 Let's Encrypt 证书 (浏览器受信任)"
+        if command -v certbot &>/dev/null; then
+            certbot certificates 2>/dev/null | grep -A10 "$SERVER_NAME" | head -5 || true
+        fi
+    else
+        log "ℹ️  使用自签名证书 (浏览器会显示安全警告)"
+        warn "注意: 自签名证书在浏览器中会显示安全警告，这是正常现象"
+        warn "如需消除警告，请使用域名并确保DNS解析正确"
+    fi
 }
 
 # -------------------------------
@@ -461,11 +591,15 @@ install_dendrite() {
     # 生成密码
     PGPASS=$(generate_password)
     
+    # 生成SSL证书（智能选择）
+    SSL_CERT=""
+    SSL_KEY=""
+    generate_ssl_cert "$SERVER_NAME"
+    
     # 生成配置
-    generate_ssl_cert || return 1
     generate_docker_compose || return 1
-    generate_nginx_config || return 1
-    generate_element_config || return 1
+    generate_nginx_config "$SERVER_NAME" "$SSL_CERT" "$SSL_KEY" || return 1
+    generate_element_config "$SERVER_NAME" || return 1
     generate_dendrite_config || return 1
     configure_shared_secret || return 1
     
@@ -490,11 +624,22 @@ show_success_message() {
     echo "管理员账号: admin"
     echo "管理员密码: $ADMIN_PASS"
     echo
+    
+    if is_domain "$SERVER_NAME" && [[ "$SSL_CERT" == *"letsencrypt"* ]]; then
+        echo "✅ 使用 Let's Encrypt 证书 - 浏览器完全信任"
+        echo "📅 证书将自动续期，无需手动管理"
+    else
+        echo "ℹ️  使用自签名证书 - 浏览器会显示安全警告"
+        echo "⚠️  如需消除警告："
+        echo "   1. 请使用域名而不是IP地址"
+        echo "   2. 确保域名DNS正确解析到本服务器"
+        echo "   3. 重新运行安装脚本选择域名"
+    fi
+    
+    echo
     echo "重要提示:"
-    echo "1. 由于使用自签名证书，浏览器会显示不安全警告"
-    echo "2. 在手机上访问时，需要点击'高级'->'继续访问'"
-    echo "3. 如需域名证书，请替换 SSL 证书文件"
-    echo "4. 查看日志: docker compose -f $DOCKER_COMPOSE_FILE logs"
+    echo "1. 查看日志: docker compose -f $DOCKER_COMPOSE_FILE logs"
+    echo "2. 备份目录: $BACKUP_DIR"
     echo "======================================"
 }
 
@@ -525,26 +670,6 @@ complete_uninstall() {
     fi
 }
 
-uninstall_preserve_data() {
-    if confirm "确定要卸载但保留数据卷和配置吗？"; then
-        log "开始卸载 Matrix Dendrite（保留数据）..."
-        
-        # 停止容器但不删除数据卷
-        if [ -f "$DOCKER_COMPOSE_FILE" ]; then
-            docker compose -f "$DOCKER_COMPOSE_FILE" down >> "$LOG_FILE" 2>&1 || true
-        fi
-        
-        # 删除配置和程序文件，但保留数据目录
-        rm -rf "$WEB_DIR" "$DOCKER_COMPOSE_FILE"
-        rm -f "$NGINX_DIR/sites-available/matrix" "$NGINX_DIR/sites-enabled/matrix"
-        
-        log "卸载完成，数据卷和配置已保留在 $INSTALL_DIR"
-        info "如需重新安装，数据将保持不变"
-    else
-        log "卸载操作已取消"
-    fi
-}
-
 upgrade_services() {
     log "开始升级服务..."
     
@@ -570,35 +695,6 @@ upgrade_services() {
     log "服务升级完成"
 }
 
-backup_database() {
-    log "开始备份数据库..."
-    
-    mkdir -p "$BACKUP_DIR"
-    DATE=$(date +'%Y%m%d_%H%M%S')
-    BACKUP_FILE="$BACKUP_DIR/dendrite_backup_$DATE.sql"
-    
-    if ! docker compose -f "$DOCKER_COMPOSE_FILE" ps postgres | grep -q "Up"; then
-        error "PostgreSQL 服务未运行，无法备份"
-        return 1
-    fi
-    
-    info "正在备份数据库到 $BACKUP_FILE..."
-    
-    if docker exec dendrite_postgres pg_dump -U dendrite dendrite > "$BACKUP_FILE" 2>> "$LOG_FILE"; then
-        # 压缩备份文件
-        gzip "$BACKUP_FILE"
-        local backup_size
-        backup_size=$(du -h "${BACKUP_FILE}.gz" | cut -f1)
-        log "备份完成: ${BACKUP_FILE}.gz (${backup_size})"
-        
-        # 清理旧备份（保留最近7天）
-        find "$BACKUP_DIR" -name "dendrite_backup_*.sql.gz" -mtime +7 -delete >> "$LOG_FILE" 2>&1
-    else
-        error "数据库备份失败"
-        return 1
-    fi
-}
-
 show_status() {
     log "服务状态检查..."
     
@@ -622,37 +718,14 @@ show_status() {
     
     echo
     echo "--------------------------------------"
-    echo "最近日志:"
-    docker compose -f "$DOCKER_COMPOSE_FILE" logs --tail=10
-    
-    echo "======================================"
-}
-
-show_logs() {
-    if [ ! -f "$DOCKER_COMPOSE_FILE" ]; then
-        error "未找到 Docker Compose 文件，服务可能未安装"
-        return 1
+    echo "证书信息:"
+    if is_domain "$SERVER_NAME" 2>/dev/null && command -v certbot &>/dev/null; then
+        certbot certificates 2>/dev/null | grep -A20 "$SERVER_NAME" || echo "未找到 Let's Encrypt 证书"
+    else
+        echo "使用自签名证书"
     fi
     
-    echo "选择要查看的日志："
-    echo "1) 所有服务日志"
-    echo "2) Dendrite 日志"
-    echo "3) PostgreSQL 日志"
-    echo "4) Element Web 日志"
-    echo "5) Nginx 日志"
-    echo "0) 返回"
-    
-    read -p "请输入数字: " log_choice
-    
-    case "$log_choice" in
-        1) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f ;;
-        2) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f dendrite ;;
-        3) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f postgres ;;
-        4) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f element-web ;;
-        5) tail -f /var/log/nginx/access.log /var/log/nginx/error.log ;;
-        0) return ;;
-        *) error "无效选项" ;;
-    esac
+    echo "======================================"
 }
 
 # -------------------------------
@@ -668,10 +741,8 @@ main_menu() {
     echo "1) 安装/部署 Matrix Dendrite"
     echo "2) 完全卸载（删除所有数据）"
     echo "3) 升级服务"
-    echo "4) 备份数据库"
-    echo "5) 卸载（保留数据）"
-    echo "6) 查看服务状态"
-    echo "7) 查看日志"
+    echo "4) 查看服务状态"
+    echo "5) 查看服务日志"
     echo "0) 退出"
     echo
     read -p "请输入数字: " OPTION
@@ -680,10 +751,23 @@ main_menu() {
         1) install_dendrite ;;
         2) complete_uninstall ;;
         3) upgrade_services ;;
-        4) backup_database ;;
-        5) uninstall_preserve_data ;;
-        6) show_status ;;
-        7) show_logs ;;
+        4) show_status ;;
+        5) 
+            echo "选择要查看的日志："
+            echo "1) 所有服务日志"
+            echo "2) Dendrite 日志"
+            echo "3) PostgreSQL 日志"
+            echo "4) Element Web 日志"
+            echo "5) Nginx 日志"
+            read -p "请输入数字: " log_choice
+            case "$log_choice" in
+                1) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f ;;
+                2) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f dendrite ;;
+                3) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f postgres ;;
+                4) docker compose -f "$DOCKER_COMPOSE_FILE" logs -f element-web ;;
+                5) tail -f /var/log/nginx/access.log /var/log/nginx/error.log ;;
+            esac
+            ;;
         0) echo "退出脚本"; exit 0 ;;
         *) error "无效选项"; main_menu ;;
     esac
